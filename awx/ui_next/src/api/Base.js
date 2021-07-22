@@ -1,6 +1,12 @@
 import axios from 'axios';
+import { encodeQueryString } from 'util/qs';
+import debounce from 'util/debounce';
+import { SESSION_TIMEOUT_KEY } from '../constants';
 
-import { encodeQueryString } from '@util/qs';
+const updateStorage = debounce((key, val) => {
+  window.localStorage.setItem(key, val);
+  window.dispatchEvent(new Event('storage'));
+}, 500);
 
 const defaultHttp = axios.create({
   xsrfCookieName: 'csrftoken',
@@ -8,6 +14,15 @@ const defaultHttp = axios.create({
   paramsSerializer(params) {
     return encodeQueryString(params);
   },
+});
+
+defaultHttp.interceptors.response.use((response) => {
+  const timeout = response?.headers['session-timeout'];
+  if (timeout) {
+    const timeoutDate = new Date().getTime() + timeout * 1000;
+    updateStorage(SESSION_TIMEOUT_KEY, String(timeoutDate));
+  }
+  return response;
 });
 
 class Base {
@@ -44,6 +59,10 @@ class Base {
 
   update(id, data) {
     return this.http.patch(`${this.baseUrl}${id}/`, data);
+  }
+
+  copy(id, data) {
+    return this.http.post(`${this.baseUrl}${id}/copy/`, data);
   }
 }
 

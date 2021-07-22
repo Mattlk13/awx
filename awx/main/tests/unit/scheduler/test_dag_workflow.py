@@ -8,7 +8,7 @@ from django.utils.encoding import smart_text
 from awx.main.scheduler.dag_workflow import WorkflowDAG
 
 
-class Job():
+class Job:
     def __init__(self, status='successful'):
         self.status = status
 
@@ -30,6 +30,7 @@ def wf_node_generator(mocker):
         wfn = WorkflowNode(id=pytest.count, unified_job_template=object(), **kwargs)
         pytest.count += 1
         return wfn
+
     return fn
 
 
@@ -62,7 +63,7 @@ def workflow_dag_1(wf_node_generator):
     return (g, nodes)
 
 
-class TestWorkflowDAG():
+class TestWorkflowDAG:
     @pytest.fixture
     def workflow_dag_root_children(self, wf_node_generator):
         g = WorkflowDAG()
@@ -84,13 +85,12 @@ class TestWorkflowDAG():
             g.add_edge(wf_root_nodes[i], n, 'label')
         return (g, wf_root_nodes, wf_leaf_nodes)
 
-
     def test_get_root_nodes(self, workflow_dag_root_children):
         (g, wf_root_nodes, ignore) = workflow_dag_root_children
         assert set([n.id for n in wf_root_nodes]) == set([n['node_object'].id for n in g.get_root_nodes()])
 
 
-class TestDNR():
+class TestDNR:
     def test_mark_dnr_nodes(self, workflow_dag_1):
         (g, nodes) = workflow_dag_1
 
@@ -133,7 +133,8 @@ class TestDNR():
         assert 1 == len(do_not_run_nodes)
         assert nodes[3] == do_not_run_nodes[0]
 
-class TestAllWorkflowNodes():
+
+class TestAllWorkflowNodes:
     # test workflow convergence is functioning as expected
     @pytest.fixture
     def simple_all_convergence(self, wf_node_generator):
@@ -150,9 +151,9 @@ class TestAllWorkflowNodes():
             1      2
              \    /
             F \  / S
-               \/ 
+               \/
                 3
-                
+
             '''
         g.add_edge(nodes[0], nodes[1], "success_nodes")
         g.add_edge(nodes[0], nodes[2], "success_nodes")
@@ -186,7 +187,7 @@ class TestAllWorkflowNodes():
               S|  1
                | /
                |/ A
-               2  
+               2
         '''
         g.add_edge(nodes[0], nodes[1], "failure_nodes")
         g.add_edge(nodes[0], nodes[2], "success_nodes")
@@ -222,7 +223,7 @@ class TestAllWorkflowNodes():
               F|  1
                | /
                |/ A
-               2  
+               2
         '''
         g.add_edge(nodes[0], nodes[1], "success_nodes")
         g.add_edge(nodes[0], nodes[2], "failure_nodes")
@@ -341,7 +342,7 @@ class TestAllWorkflowNodes():
             g.add_node(n)
         r'''
                0    1    2
-                \   |   / 
+                \   |   /
                S \ S|  / F
                   \ | /
                    \|/
@@ -349,7 +350,7 @@ class TestAllWorkflowNodes():
                     3
                    /\
                 S /  \ S
-                 /    \ 
+                 /    \
                4|      | 5
                  \    /
                 S \  / S
@@ -387,7 +388,7 @@ class TestAllWorkflowNodes():
         assert 0 == len(nodes_to_run), "All non-run nodes should be DNR and NOT candidates to run"
 
 
-class TestIsWorkflowDone():
+class TestIsWorkflowDone:
     @pytest.fixture
     def workflow_dag_2(self, workflow_dag_1):
         (g, nodes) = workflow_dag_1
@@ -465,9 +466,15 @@ class TestIsWorkflowDone():
         (g, nodes) = workflow_dag_failed
 
         assert g.is_workflow_done() is True
-        assert g.has_workflow_failed() == \
-            (True, smart_text(_("No error handle path for workflow job node(s) [({},{})] workflow job node(s)"
-                                " missing unified job template and error handle path [].").format(nodes[2].id, nodes[2].job.status)))
+        assert g.has_workflow_failed() == (
+            True,
+            smart_text(
+                _(
+                    "No error handling path for workflow job node(s) [({},{})]. Workflow job node(s)"
+                    " missing unified job template and error handling path []."
+                ).format(nodes[2].id, nodes[2].job.status)
+            ),
+        )
 
     def test_is_workflow_done_no_unified_job_tempalte_end(self, workflow_dag_failed):
         (g, nodes) = workflow_dag_failed
@@ -475,9 +482,14 @@ class TestIsWorkflowDone():
         nodes[2].unified_job_template = None
 
         assert g.is_workflow_done() is True
-        assert g.has_workflow_failed() == \
-            (True, smart_text(_("No error handle path for workflow job node(s) [] workflow job node(s) missing"
-             " unified job template and error handle path [{}].").format(nodes[2].id)))
+        assert g.has_workflow_failed() == (
+            True,
+            smart_text(
+                _(
+                    "No error handling path for workflow job node(s) []. Workflow job node(s) missing" " unified job template and error handling path [{}]."
+                ).format(nodes[2].id)
+            ),
+        )
 
     def test_is_workflow_done_no_unified_job_tempalte_begin(self, workflow_dag_1):
         (g, nodes) = workflow_dag_1
@@ -486,26 +498,43 @@ class TestIsWorkflowDone():
         g.mark_dnr_nodes()
 
         assert g.is_workflow_done() is True
-        assert g.has_workflow_failed() == \
-            (True, smart_text(_("No error handle path for workflow job node(s) [] workflow job node(s) missing"
-             " unified job template and error handle path [{}].").format(nodes[0].id)))
+        assert g.has_workflow_failed() == (
+            True,
+            smart_text(
+                _(
+                    "No error handling path for workflow job node(s) []. Workflow job node(s) missing" " unified job template and error handling path [{}]."
+                ).format(nodes[0].id)
+            ),
+        )
 
     def test_canceled_should_fail(self, workflow_dag_canceled):
         (g, nodes) = workflow_dag_canceled
 
-        assert g.has_workflow_failed() == \
-            (True, smart_text(_("No error handle path for workflow job node(s) [({},{})] workflow job node(s)"
-                                " missing unified job template and error handle path [].").format(nodes[0].id, nodes[0].job.status)))
+        assert g.has_workflow_failed() == (
+            True,
+            smart_text(
+                _(
+                    "No error handling path for workflow job node(s) [({},{})]. Workflow job node(s)"
+                    " missing unified job template and error handling path []."
+                ).format(nodes[0].id, nodes[0].job.status)
+            ),
+        )
 
     def test_failure_should_fail(self, workflow_dag_failure):
         (g, nodes) = workflow_dag_failure
 
-        assert g.has_workflow_failed() == \
-            (True, smart_text(_("No error handle path for workflow job node(s) [({},{})] workflow job node(s)"
-                                " missing unified job template and error handle path [].").format(nodes[0].id, nodes[0].job.status)))
+        assert g.has_workflow_failed() == (
+            True,
+            smart_text(
+                _(
+                    "No error handling path for workflow job node(s) [({},{})]. Workflow job node(s)"
+                    " missing unified job template and error handling path []."
+                ).format(nodes[0].id, nodes[0].job.status)
+            ),
+        )
 
 
-class TestBFSNodesToRun():
+class TestBFSNodesToRun:
     @pytest.fixture
     def workflow_dag_canceled(self, wf_node_generator):
         g = WorkflowDAG()
@@ -533,7 +562,7 @@ class TestBFSNodesToRun():
 
 
 @pytest.mark.skip(reason="Run manually to re-generate doc images")
-class TestDocsExample():
+class TestDocsExample:
     @pytest.fixture
     def complex_dag(self, wf_node_generator):
         g = WorkflowDAG()

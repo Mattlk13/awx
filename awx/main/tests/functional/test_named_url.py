@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import pytest
 
 from django.core.exceptions import ImproperlyConfigured
@@ -6,9 +7,19 @@ from django.conf import settings
 from awx.api.versioning import reverse
 from awx.main.middleware import URLModificationMiddleware
 from awx.main.models import (  # noqa
-    Credential, CustomInventoryScript, Group, Host, Instance, InstanceGroup,
-    Inventory, InventorySource, JobTemplate, NotificationTemplate,
-    Organization, Project, User, WorkflowJobTemplate,
+    Credential,
+    Group,
+    Host,
+    Instance,
+    InstanceGroup,
+    Inventory,
+    InventorySource,
+    JobTemplate,
+    NotificationTemplate,
+    Organization,
+    Project,
+    User,
+    WorkflowJobTemplate,
 )
 from awx.conf import settings_registry
 
@@ -26,7 +37,7 @@ def setup_module(module):
 
 
 def teardown_module(module):
-    # settings_registry will be persistent states unless we explicitly clean them up. 
+    # settings_registry will be persistent states unless we explicitly clean them up.
     settings_registry.unregister('NAMED_URL_FORMATS')
     settings_registry.unregister('NAMED_URL_GRAPH_NODES')
 
@@ -58,10 +69,25 @@ def test_organization(get, admin_user):
 
 @pytest.mark.django_db
 def test_job_template(get, admin_user):
-    test_jt = JobTemplate.objects.create(name='test_jt')
+    test_org = Organization.objects.create(name='test_org')
+    test_jt = JobTemplate.objects.create(name='test_jt', organization=test_org)
     url = reverse('api:job_template_detail', kwargs={'pk': test_jt.pk})
     response = get(url, user=admin_user, expect=200)
-    assert response.data['related']['named_url'].endswith('/test_jt/')
+    assert response.data['related']['named_url'].endswith('/test_jt++test_org/')
+
+
+@pytest.mark.django_db
+def test_job_template_old_way(get, admin_user, mocker):
+    test_org = Organization.objects.create(name='test_org')
+    test_jt = JobTemplate.objects.create(name='test_jt ♥', organization=test_org)
+    url = reverse('api:job_template_detail', kwargs={'pk': test_jt.pk})
+
+    response = get(url, user=admin_user, expect=200)
+    new_url = response.data['related']['named_url']
+    old_url = '/'.join([url.rsplit('/', 2)[0], test_jt.name, ''])
+
+    assert URLModificationMiddleware._convert_named_url(new_url) == url
+    assert URLModificationMiddleware._convert_named_url(old_url) == url
 
 
 @pytest.mark.django_db
@@ -102,8 +128,7 @@ def test_project(get, admin_user):
 @pytest.mark.django_db
 def test_notification_template(get, admin_user):
     test_notification_template = NotificationTemplate.objects.create(
-        name='test_note', notification_type='slack',
-        notification_configuration=dict(channels=["Foo", "Bar"], token="token")
+        name='test_note', notification_type='slack', notification_configuration=dict(channels=["Foo", "Bar"], token="token")
     )
     url = reverse('api:notification_template_detail', kwargs={'pk': test_notification_template.pk})
     response = get(url, user=admin_user, expect=200)
@@ -117,9 +142,7 @@ def test_notification_template(get, admin_user):
 
 @pytest.mark.django_db
 def test_instance(get, admin_user):
-    test_instance = Instance.objects.create(
-        uuid=settings.SYSTEM_UUID, hostname="localhost", capacity=100
-    )
+    test_instance = Instance.objects.create(uuid=settings.SYSTEM_UUID, hostname="localhost", capacity=100)
     url = reverse('api:instance_detail', kwargs={'pk': test_instance.pk})
     response = get(url, user=admin_user, expect=200)
     assert response.data['related']['named_url'].endswith('/localhost/')
@@ -170,7 +193,7 @@ def test_group(get, admin_user):
 def test_inventory_source(get, admin_user):
     test_org = Organization.objects.create(name='test_org')
     test_inv = Inventory.objects.create(name='test_inv', organization=test_org)
-    test_source = InventorySource.objects.create(name='test_source', inventory=test_inv)
+    test_source = InventorySource.objects.create(name='test_source', inventory=test_inv, source='ec2')
     url = reverse('api:inventory_source_detail', kwargs={'pk': test_source.pk})
     response = get(url, user=admin_user, expect=200)
     assert response.data['related']['named_url'].endswith('/test_source++test_inv++test_org/')
@@ -181,21 +204,24 @@ def test_inventory_source(get, admin_user):
 
 
 @pytest.mark.django_db
-def test_inventory_script(get, admin_user):
-    test_script = CustomInventoryScript.objects.create(name='test_script')
-    url = reverse('api:inventory_script_detail', kwargs={'pk': test_script.pk})
-    response = get(url, user=admin_user, expect=200)
-    assert response.data['related']['named_url'].endswith('/test_script++/')
-    test_org = Organization.objects.create(name='test_org')
-    test_script.organization = test_org
-    test_script.save()
-    response = get(url, user=admin_user, expect=200)
-    assert response.data['related']['named_url'].endswith('/test_script++test_org/')
-
-
-@pytest.mark.django_db
 def test_credential(get, admin_user, credentialtype_ssh):
     test_cred = Credential.objects.create(name='test_cred', credential_type=credentialtype_ssh)
     url = reverse('api:credential_detail', kwargs={'pk': test_cred.pk})
     response = get(url, user=admin_user, expect=200)
     assert response.data['related']['named_url'].endswith('/test_cred++Machine+ssh++/')
+
+
+@pytest.mark.django_db
+def test_403_vs_404(get):
+    cindy = User.objects.create(username='cindy', password='test_user', is_superuser=False)
+    bob = User.objects.create(username='bob', password='test_user', is_superuser=False)
+
+    # bob cannot see cindy, pk lookup should be a 403
+    url = reverse('api:user_detail', kwargs={'pk': cindy.pk})
+    get(url, user=bob, expect=403)
+
+    # bob cannot see cindy, username lookup should be a 404
+    get('/api/v2/users/cindy/', user=bob, expect=404)
+
+    get(f'/api/v2/users/{cindy.pk}/', expect=401)
+    get('/api/v2/users/cindy/', expect=404)

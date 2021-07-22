@@ -2,7 +2,6 @@ import locale
 import json
 from distutils.util import strtobool
 
-import six
 import yaml
 
 from awxkit.cli.utils import colored
@@ -12,76 +11,73 @@ def add_authentication_arguments(parser, env):
     auth = parser.add_argument_group('authentication')
     auth.add_argument(
         '--conf.host',
-        default=env.get('TOWER_HOST', 'https://127.0.0.1:443'),
+        default=env.get('CONTROLLER_HOST', env.get('TOWER_HOST', 'https://127.0.0.1:443')),
         metavar='https://example.awx.org',
     )
     auth.add_argument(
         '--conf.token',
-        default=env.get('TOWER_TOKEN', ''),
+        default=env.get('CONTROLLER_OAUTH_TOKEN', env.get('CONTROLLER_TOKEN', env.get('TOWER_OAUTH_TOKEN', env.get('TOWER_TOKEN', '')))),
         help='an OAuth2.0 token (get one by using `awx login`)',
         metavar='TEXT',
     )
     auth.add_argument(
         '--conf.username',
-        default=env.get('TOWER_USERNAME', 'admin'),
+        default=env.get('CONTROLLER_USERNAME', env.get('TOWER_USERNAME', 'admin')),
         metavar='TEXT',
     )
     auth.add_argument(
         '--conf.password',
-        default=env.get('TOWER_PASSWORD', 'password'),
+        default=env.get('CONTROLLER_PASSWORD', env.get('TOWER_PASSWORD', 'password')),
         metavar='TEXT',
     )
     auth.add_argument(
         '-k',
         '--conf.insecure',
         help='Allow insecure server connections when using SSL',
-        default=not strtobool(env.get('TOWER_VERIFY_SSL', 'True')),
+        default=not strtobool(env.get('CONTROLLER_VERIFY_SSL', env.get('TOWER_VERIFY_SSL', 'True'))),
         action='store_true',
     )
 
 
 def add_output_formatting_arguments(parser, env):
-    formatting = parser.add_argument_group('output formatting')
+    formatting = parser.add_argument_group('input/output formatting')
 
     formatting.add_argument(
         '-f',
         '--conf.format',
         dest='conf.format',
         choices=FORMATTERS.keys(),
-        default=env.get('TOWER_FORMAT', 'json'),
-        help=(
-            'specify an output format'
-        ),
+        default=env.get('CONTROLLER_FORMAT', env.get('TOWER_FORMAT', 'json')),
+        help=('specify a format for the input and output'),
     )
     formatting.add_argument(
         '--filter',
         dest='conf.filter',
         default='.',
         metavar='TEXT',
-        help=(
-            'specify an output filter (only valid with jq or human format)'
-        ),
+        help=('specify an output filter (only valid with jq or human format)'),
     )
     formatting.add_argument(
         '--conf.color',
         metavar='BOOLEAN',
         help='Display colorized output.  Defaults to True',
-        default=env.get('TOWER_COLOR', 't'), type=strtobool,
+        default=env.get('CONTROLLER_COLOR', env.get('TOWER_COLOR', 't')),
+        type=strtobool,
     )
     formatting.add_argument(
         '-v',
         '--verbose',
         dest='conf.verbose',
         help='print debug-level logs, including requests made',
-        default=strtobool(env.get('TOWER_VERBOSE', 'f')),
-        action="store_true"
+        default=strtobool(env.get('CONTROLLER_VERBOSE', env.get('TOWER_VERBOSE', 'f'))),
+        action="store_true",
     )
 
 
 def format_response(response, fmt='json', filter='.', changed=False):
     if response is None:
         return  # HTTP 204
-    if isinstance(response, six.text_type):
+    if isinstance(response, str):
         return response
 
     if 'results' in response.__dict__:
@@ -106,16 +102,15 @@ def format_jq(output, fmt):
         if fmt == '.':
             return output
         raise ImportError(
-            'To use `-f jq`, you must install the optional jq dependency.\n'
-            '`pip install jq`\n',
+            'To use `-f jq`, you must install the optional jq dependency.\n' '`pip install jq`\n',
             'Note that some platforms may require additional programs to '
             'build jq from source (like `libtool`).\n'
-            'See https://pypi.org/project/jq/ for instructions.'
+            'See https://pypi.org/project/jq/ for instructions.',
         )
     results = []
     for x in jq.jq(fmt).transform(output, multiple_output=True):
         if x not in (None, ''):
-            if isinstance(x, six.text_type):
+            if isinstance(x, str):
                 results.append(x)
             else:
                 results.append(json.dumps(x))
@@ -128,12 +123,7 @@ def format_json(output, fmt):
 
 def format_yaml(output, fmt):
     output = json.loads(json.dumps(output))
-    return yaml.safe_dump(
-        output,
-        default_flow_style=False,
-        encoding='utf-8',
-        allow_unicode=True
-    )
+    return yaml.safe_dump(output, default_flow_style=False, allow_unicode=True)
 
 
 def format_human(output, fmt):
@@ -153,10 +143,7 @@ def format_human(output, fmt):
                 column_names.remove(k)
 
     table = [column_names]
-    table.extend([
-        [record.get(col, '') for col in column_names]
-        for record in output
-    ])
+    table.extend([[record.get(col, '') for col in column_names] for record in output])
     col_paddings = []
 
     def format_num(v):
@@ -186,9 +173,4 @@ def format_human(output, fmt):
     return '\n'.join(lines)
 
 
-FORMATTERS = {
-    'json': format_json,
-    'yaml': format_yaml,
-    'jq': format_jq,
-    'human': format_human
-}
+FORMATTERS = {'json': format_json, 'yaml': format_yaml, 'jq': format_jq, 'human': format_human}

@@ -8,18 +8,21 @@
       "modules": true
     }
   },
-  "plugins": [
-    "react-hooks"
+  "plugins": ["react-hooks", "jsx-a11y", "i18next"],
+  "extends": [
+    "airbnb",
+    "prettier",
+    "plugin:jsx-a11y/strict",
+    "plugin:i18next/recommended"
   ],
-  "extends": ["airbnb", "prettier", "prettier/react"],
   "settings": {
-    "import/resolver": {
-      "webpack": {
-        "config": "webpack.config.js"
-      }
-    },
     "react": {
       "version": "16.5.2"
+    },
+    "import/resolver": {
+      "node": {
+        "paths": ["src"]
+      }
     }
   },
   "env": {
@@ -31,10 +34,85 @@
     "window": true
   },
   "rules": {
+    "i18next/no-literal-string": [
+      2,
+      {
+        "markupOnly": true,
+        "ignoreAttribute": [
+          "dateFieldName",
+          "timeFieldName",
+          "to",
+          "streamType",
+          "path",
+          "component",
+          "variant",
+          "key",
+          "position",
+          "promptName",
+          "color",
+          "promptId",
+          "headingLevel",
+          "size",
+          "target",
+          "autoComplete",
+          "trigger",
+          "from",
+          "name",
+          "fieldId",
+          "css",
+          "gutter",
+          "dataCy",
+          "tooltipMaxWidth",
+          "mode",
+          "aria-labelledby",
+          "aria-hidden",
+          "aria-controls",
+          "aria-pressed",
+          "sortKey",
+          "ouiaId",
+          "credentialTypeNamespace",
+          "link",
+          "value",
+          "credentialTypeKind",
+          "linkTo",
+          "scrollToAlignment",
+          "displayKey",
+          "sortedColumnKey",
+          "maxHeight",
+          "role",
+          "aria-haspopup",
+          "dropDirection",
+          "resizeOrientation",
+          "src",
+          "theme",
+          "gridColumns",
+          "rows",
+          "href",
+          "modifier",
+          "data-cy",
+          "fieldName"
+        ],
+        "ignore": ["Ansible", "Tower", "JSON", "YAML", "lg", "hh:mm AM/PM"],
+        "ignoreComponent": [
+          "AboutModal",
+          "code",
+          "Omit",
+          "PotentialLink",
+          "TypeRedirect",
+          "Radio",
+          "RunOnRadio",
+          "NodeTypeLetter",
+          "SelectableItem",
+          "Dash",
+          "Plural"
+        ],
+        "ignoreCallee": ["describe"]
+      }
+    ],
     "camelcase": "off",
     "arrow-parens": "off",
     "comma-dangle": "off",
-    "//": "https://github.com/benmosher/eslint-plugin-import/issues/479#issuecomment-252500896",
+    // https://github.com/benmosher/eslint-plugin-import/issues/479#issuecomment-252500896
     "import/no-extraneous-dependencies": "off",
     "max-len": [
       "error",
@@ -55,12 +133,14 @@
     "object-curly-newline": "off",
     "no-trailing-spaces": ["error"],
     "no-unused-expressions": ["error", { "allowShortCircuit": true }],
+    "react/jsx-props-no-spreading":["off"],
     "react/prefer-stateless-function": "off",
     "react/prop-types": "off",
     "react/sort-comp": ["error", {}],
     "jsx-a11y/label-has-for": "off",
     "jsx-a11y/label-has-associated-control": "off",
     "react-hooks/rules-of-hooks": "error",
-    "react-hooks/exhaustive-deps": "warn"
+    "react-hooks/exhaustive-deps": "warn",
+    "react/jsx-filename-extension": "off"
   }
 }

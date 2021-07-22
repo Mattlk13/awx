@@ -10,10 +10,6 @@ import copy
 import os.path
 from urllib.parse import urljoin
 import yaml
-import configparser
-import tempfile
-from io import StringIO
-from distutils.version import LooseVersion as Version
 
 # Django
 from django.conf import settings
@@ -22,7 +18,6 @@ from django.utils.translation import ugettext_lazy as _
 from django.db import transaction
 from django.core.exceptions import ValidationError
 from django.utils.timezone import now
-from django.utils.encoding import iri_to_uri
 from django.db.models import Q
 
 # REST Framework
@@ -39,14 +34,8 @@ from awx.main.fields import (
     OrderedManyToManyField,
 )
 from awx.main.managers import HostManager
-from awx.main.models.base import (
-    BaseModel,
-    CommonModelNameNotUnique,
-    VarsDictProperty,
-    CLOUD_INVENTORY_SOURCES,
-    prevent_search, accepts_json
-)
-from awx.main.models.events import InventoryUpdateEvent
+from awx.main.models.base import BaseModel, CommonModelNameNotUnique, VarsDictProperty, CLOUD_INVENTORY_SOURCES, prevent_search, accepts_json
+from awx.main.models.events import InventoryUpdateEvent, UnpartitionedInventoryUpdateEvent
 from awx.main.models.unified_jobs import UnifiedJob, UnifiedJobTemplate
 from awx.main.models.mixins import (
     ResourceMixin,
@@ -59,20 +48,21 @@ from awx.main.models.notifications import (
     JobNotificationMixin,
 )
 from awx.main.models.credential.injectors import _openstack_data
-from awx.main.utils import _inventory_updates, region_sorting, get_licenser
+from awx.main.utils import _inventory_updates
 from awx.main.utils.safe_yaml import sanitize_jinja
+from awx.main.utils.execution_environments import to_container_path
+from awx.main.utils.licensing import server_product_name
 
 
-__all__ = ['Inventory', 'Host', 'Group', 'InventorySource', 'InventoryUpdate',
-           'CustomInventoryScript', 'SmartInventoryMembership']
+__all__ = ['Inventory', 'Host', 'Group', 'InventorySource', 'InventoryUpdate', 'SmartInventoryMembership']
 
 logger = logging.getLogger('awx.main.models.inventory')
 
 
 class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
-    '''
+    """
     an inventory source contains lists and hosts.
-    '''
+    """
 
     FIELDS_TO_PRESERVE_AT_COPY = ['hosts', 'groups', 'instance_groups']
     KIND_CHOICES = [
@@ -93,40 +83,39 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
         on_delete=models.SET_NULL,
         null=True,
     )
-    variables = accepts_json(models.TextField(
-        blank=True,
-        default='',
-        help_text=_('Inventory variables in JSON or YAML format.'),
-    ))
+    variables = accepts_json(
+        models.TextField(
+            blank=True,
+            default='',
+            help_text=_('Inventory variables in JSON or YAML format.'),
+        )
+    )
     has_active_failures = models.BooleanField(
         default=False,
         editable=False,
-        help_text=_('This field is deprecated and will be removed in a future release. '
-                    'Flag indicating whether any hosts in this inventory have failed.'),
+        help_text=_('This field is deprecated and will be removed in a future release. ' 'Flag indicating whether any hosts in this inventory have failed.'),
     )
     total_hosts = models.PositiveIntegerField(
         default=0,
         editable=False,
-        help_text=_('This field is deprecated and will be removed in a future release. '
-                    'Total number of hosts in this inventory.'),
+        help_text=_('This field is deprecated and will be removed in a future release. ' 'Total number of hosts in this inventory.'),
     )
     hosts_with_active_failures = models.PositiveIntegerField(
         default=0,
         editable=False,
-        help_text=_('This field is deprecated and will be removed in a future release. '
-                    'Number of hosts in this inventory with active failures.'),
+        help_text=_('This field is deprecated and will be removed in a future release. ' 'Number of hosts in this inventory with active failures.'),
     )
     total_groups = models.PositiveIntegerField(
         default=0,
         editable=False,
-        help_text=_('This field is deprecated and will be removed in a future release. '
-                    'Total number of groups in this inventory.'),
+        help_text=_('This field is deprecated and will be removed in a future release. ' 'Total number of groups in this inventory.'),
     )
     has_inventory_sources = models.BooleanField(
         default=False,
         editable=False,
-        help_text=_('This field is deprecated and will be removed in a future release. '
-                    'Flag indicating whether this inventory has any external inventory sources.'),
+        help_text=_(
+            'This field is deprecated and will be removed in a future release. ' 'Flag indicating whether this inventory has any external inventory sources.'
+        ),
     )
     total_inventory_sources = models.PositiveIntegerField(
         default=0,
@@ -168,20 +157,13 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
     use_role = ImplicitRoleField(
         parent_role='adhoc_role',
     )
-    read_role = ImplicitRoleField(parent_role=[
-        'organization.auditor_role',
-        'update_role',
-        'use_role',
-        'admin_role',
-    ])
-    insights_credential = models.ForeignKey(
-        'Credential',
-        related_name='insights_inventories',
-        help_text=_('Credentials to be used by hosts belonging to this inventory when accessing Red Hat Insights API.'),
-        on_delete=models.SET_NULL,
-        blank=True,
-        null=True,
-        default=None,
+    read_role = ImplicitRoleField(
+        parent_role=[
+            'organization.auditor_role',
+            'update_role',
+            'use_role',
+            'admin_role',
+        ]
     )
     pending_deletion = models.BooleanField(
         default=False,
@@ -189,16 +171,15 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
         help_text=_('Flag indicating the inventory is being deleted.'),
     )
 
-
     def get_absolute_url(self, request=None):
         return reverse('api:inventory_detail', kwargs={'pk': self.pk}, request=request)
 
     variables_dict = VarsDictProperty('variables')
 
     def get_group_hosts_map(self):
-        '''
+        """
         Return dictionary mapping group_id to set of child host_id's.
-        '''
+        """
         # FIXME: Cache this mapping?
         group_hosts_kw = dict(group__inventory_id=self.pk, host__inventory_id=self.pk)
         group_hosts_qs = Group.hosts.through.objects.filter(**group_hosts_kw)
@@ -210,9 +191,9 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
         return group_hosts_map
 
     def get_group_parents_map(self):
-        '''
+        """
         Return dictionary mapping group_id to set of parent group_id's.
-        '''
+        """
         # FIXME: Cache this mapping?
         group_parents_kw = dict(from_group__inventory_id=self.pk, to_group__inventory_id=self.pk)
         group_parents_qs = Group.parents.through.objects.filter(**group_parents_kw)
@@ -224,9 +205,9 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
         return group_parents_map
 
     def get_group_children_map(self):
-        '''
+        """
         Return dictionary mapping group_id to set of child group_id's.
-        '''
+        """
         # FIXME: Cache this mapping?
         group_parents_kw = dict(from_group__inventory_id=self.pk, to_group__inventory_id=self.pk)
         group_parents_qs = Group.parents.through.objects.filter(**group_parents_kw)
@@ -276,10 +257,9 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
             grouped_hosts = set([])
 
             # Build in-memory mapping of groups and their hosts.
-            group_hosts_qs = Group.hosts.through.objects.filter(
-                group__inventory_id=self.id,
-                host__inventory_id=self.id
-            ).values_list('group_id', 'host_id', 'host__name')
+            group_hosts_qs = Group.hosts.through.objects.filter(group__inventory_id=self.id, host__inventory_id=self.id).values_list(
+                'group_id', 'host_id', 'host__name'
+            )
             group_hosts_map = {}
             for group_id, host_id, host_name in group_hosts_qs:
                 if host_name not in all_hostnames:
@@ -326,16 +306,20 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
             for host in hosts:
                 data['_meta']['hostvars'][host.name] = host.variables_dict
                 if towervars:
-                    tower_dict = dict(remote_tower_enabled=str(host.enabled).lower(),
-                                      remote_tower_id=host.id)
+                    tower_dict = dict(
+                        remote_tower_enabled=str(host.enabled).lower(),
+                        remote_tower_id=host.id,
+                        remote_host_enabled=str(host.enabled).lower(),
+                        remote_host_id=host.id,
+                    )
                     data['_meta']['hostvars'][host.name].update(tower_dict)
 
         return data
 
     def update_computed_fields(self):
-        '''
+        """
         Update model fields that are computed from database relationships.
-        '''
+        """
         logger.debug("Going to update inventory computed fields, pk={0}".format(self.pk))
         start_time = time.time()
         active_hosts = self.hosts
@@ -368,31 +352,23 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
                 computed_fields.pop(field)
         if computed_fields:
             iobj.save(update_fields=computed_fields.keys())
-        logger.debug("Finished updating inventory computed fields, pk={0}, in "
-                     "{1:.3f} seconds".format(self.pk, time.time() - start_time))
+        logger.debug("Finished updating inventory computed fields, pk={0}, in " "{1:.3f} seconds".format(self.pk, time.time() - start_time))
 
     def websocket_emit_status(self, status):
-        connection.on_commit(lambda: emit_channel_notification(
-            'inventories-status_changed',
-            {'group_name': 'inventories', 'inventory_id': self.id, 'status': status}
-        ))
+        connection.on_commit(
+            lambda: emit_channel_notification('inventories-status_changed', {'group_name': 'inventories', 'inventory_id': self.id, 'status': status})
+        )
 
     @property
     def root_groups(self):
         group_pks = self.groups.values_list('pk', flat=True)
         return self.groups.exclude(parents__pk__in=group_pks).distinct()
 
-    def clean_insights_credential(self):
-        if self.kind == 'smart' and self.insights_credential:
-            raise ValidationError(_("Assignment not allowed for Smart Inventory"))
-        if self.insights_credential and self.insights_credential.credential_type.kind != 'insights':
-            raise ValidationError(_("Credential kind must be 'insights'."))
-        return self.insights_credential
-
     @transaction.atomic
     def schedule_deletion(self, user_id=None):
         from awx.main.tasks import delete_inventory
         from awx.main.signals import activity_stream_delete
+
         if self.pending_deletion is True:
             raise RuntimeError("Inventory is already pending deletion.")
         self.pending_deletion = True
@@ -404,16 +380,18 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
 
     def _update_host_smart_inventory_memeberships(self):
         if self.kind == 'smart' and settings.AWX_REBUILD_SMART_MEMBERSHIP:
+
             def on_commit():
                 from awx.main.tasks import update_host_smart_inventory_memberships
+
                 update_host_smart_inventory_memberships.delay()
+
             connection.on_commit(on_commit)
 
     def save(self, *args, **kwargs):
         self._update_host_smart_inventory_memeberships()
         super(Inventory, self).save(*args, **kwargs)
-        if (self.kind == 'smart' and 'host_filter' in kwargs.get('update_fields', ['host_filter']) and
-                connection.vendor != 'sqlite'):
+        if self.kind == 'smart' and 'host_filter' in kwargs.get('update_fields', ['host_filter']) and connection.vendor != 'sqlite':
             # Minimal update of host_count for smart inventory host filter changes
             self.update_computed_fields()
 
@@ -424,18 +402,15 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
     '''
     RelatedJobsMixin
     '''
+
     def _get_related_jobs(self):
-        return UnifiedJob.objects.non_polymorphic().filter(
-            Q(Job___inventory=self) |
-            Q(InventoryUpdate___inventory_source__inventory=self) |
-            Q(AdHocCommand___inventory=self)
-        )
+        return UnifiedJob.objects.non_polymorphic().filter(Q(job__inventory=self) | Q(inventoryupdate__inventory=self) | Q(adhoccommand__inventory=self))
 
 
 class SmartInventoryMembership(BaseModel):
-    '''
+    """
     A lookup table for Host membership in Smart Inventory
-    '''
+    """
 
     class Meta:
         app_label = 'main'
@@ -446,17 +421,15 @@ class SmartInventoryMembership(BaseModel):
 
 
 class Host(CommonModelNameNotUnique, RelatedJobsMixin):
-    '''
+    """
     A managed node
-    '''
+    """
 
-    FIELDS_TO_PRESERVE_AT_COPY = [
-        'name', 'description', 'groups', 'inventory', 'enabled', 'instance_id', 'variables'
-    ]
+    FIELDS_TO_PRESERVE_AT_COPY = ['name', 'description', 'groups', 'inventory', 'enabled', 'instance_id', 'variables']
 
     class Meta:
         app_label = 'main'
-        unique_together = (("name", "inventory"),) # FIXME: Add ('instance_id', 'inventory') after migration.
+        unique_together = (("name", "inventory"),)  # FIXME: Add ('instance_id', 'inventory') after migration.
         ordering = ('name',)
 
     inventory = models.ForeignKey(
@@ -479,11 +452,13 @@ class Host(CommonModelNameNotUnique, RelatedJobsMixin):
         default='',
         help_text=_('The value used by the remote inventory source to uniquely identify the host'),
     )
-    variables = accepts_json(models.TextField(
-        blank=True,
-        default='',
-        help_text=_('Host variables in JSON or YAML format.'),
-    ))
+    variables = accepts_json(
+        models.TextField(
+            blank=True,
+            default='',
+            help_text=_('Host variables in JSON or YAML format.'),
+        )
+    )
     last_job = models.ForeignKey(
         'Job',
         related_name='hosts_as_last_job+',
@@ -518,13 +493,6 @@ class Host(CommonModelNameNotUnique, RelatedJobsMixin):
         null=True,
         help_text=_('The date and time ansible_facts was last modified.'),
     )
-    insights_system_id = models.TextField(
-        blank=True,
-        default=None,
-        null=True,
-        db_index=True,
-        help_text=_('Red Hat Insights host unique identifier.'),
-    )
 
     objects = HostManager()
 
@@ -535,10 +503,10 @@ class Host(CommonModelNameNotUnique, RelatedJobsMixin):
 
     @property
     def all_groups(self):
-        '''
+        """
         Return all groups of which this host is a member, avoiding infinite
         recursion in the case of cyclical group relations.
-        '''
+        """
         group_parents_map = self.inventory.get_group_parents_map()
         group_pks = set(self.groups.values_list('pk', flat=True))
         child_pks_to_check = set()
@@ -559,6 +527,7 @@ class Host(CommonModelNameNotUnique, RelatedJobsMixin):
     '''
     We don't use timestamp, but we may in the future.
     '''
+
     def update_ansible_facts(self, module, facts, timestamp=None):
         if module == "ansible":
             self.ansible_facts.update(facts)
@@ -567,10 +536,10 @@ class Host(CommonModelNameNotUnique, RelatedJobsMixin):
         self.save()
 
     def get_effective_host_name(self):
-        '''
+        """
         Return the name of the host that will be used in actual ansible
         command run.
-        '''
+        """
         host_name = self.name
         if 'ansible_ssh_host' in self.variables_dict:
             host_name = self.variables_dict['ansible_ssh_host']
@@ -580,9 +549,12 @@ class Host(CommonModelNameNotUnique, RelatedJobsMixin):
 
     def _update_host_smart_inventory_memeberships(self):
         if settings.AWX_REBUILD_SMART_MEMBERSHIP:
+
             def on_commit():
                 from awx.main.tasks import update_host_smart_inventory_memberships
+
                 update_host_smart_inventory_memberships.delay()
+
             connection.on_commit(on_commit)
 
     def clean_name(self):
@@ -603,19 +575,18 @@ class Host(CommonModelNameNotUnique, RelatedJobsMixin):
     '''
     RelatedJobsMixin
     '''
+
     def _get_related_jobs(self):
         return self.inventory._get_related_jobs()
 
 
 class Group(CommonModelNameNotUnique, RelatedJobsMixin):
-    '''
+    """
     A group containing managed hosts.  A group or host may belong to multiple
     groups.
-    '''
+    """
 
-    FIELDS_TO_PRESERVE_AT_COPY = [
-        'name', 'description', 'inventory', 'children', 'parents', 'hosts', 'variables'
-    ]
+    FIELDS_TO_PRESERVE_AT_COPY = ['name', 'description', 'inventory', 'children', 'parents', 'hosts', 'variables']
 
     class Meta:
         app_label = 'main'
@@ -634,11 +605,13 @@ class Group(CommonModelNameNotUnique, RelatedJobsMixin):
         related_name='children',
         blank=True,
     )
-    variables = accepts_json(models.TextField(
-        blank=True,
-        default='',
-        help_text=_('Group variables in JSON or YAML format.'),
-    ))
+    variables = accepts_json(
+        models.TextField(
+            blank=True,
+            default='',
+            help_text=_('Group variables in JSON or YAML format.'),
+        )
+    )
     hosts = models.ManyToManyField(
         'Host',
         related_name='groups',
@@ -660,7 +633,6 @@ class Group(CommonModelNameNotUnique, RelatedJobsMixin):
         from awx.main.utils import ignore_inventory_computed_fields
         from awx.main.tasks import update_inventory_computed_fields
         from awx.main.signals import disable_activity_stream, activity_stream_delete
-
 
         def mark_actual():
             all_group_hosts = Group.hosts.through.objects.select_related("host", "group").filter(group__inventory=self.inventory)
@@ -714,6 +686,7 @@ class Group(CommonModelNameNotUnique, RelatedJobsMixin):
             Group.objects.filter(id__in=marked_groups).delete()
             Host.objects.filter(id__in=marked_hosts).delete()
             update_inventory_computed_fields.delay(self.inventory.id)
+
         with ignore_inventory_computed_fields():
             with disable_activity_stream():
                 mark_actual()
@@ -722,10 +695,10 @@ class Group(CommonModelNameNotUnique, RelatedJobsMixin):
     variables_dict = VarsDictProperty('variables')
 
     def get_all_parents(self, except_pks=None):
-        '''
+        """
         Return all parents of this group recursively.  The group itself will
         be excluded unless there is a cycle leading back to it.
-        '''
+        """
         group_parents_map = self.inventory.get_group_parents_map()
         child_pks_to_check = set([self.pk])
         child_pks_checked = set()
@@ -744,10 +717,10 @@ class Group(CommonModelNameNotUnique, RelatedJobsMixin):
         return self.get_all_parents()
 
     def get_all_children(self, except_pks=None):
-        '''
+        """
         Return all children of this group recursively.  The group itself will
         be excluded unless there is a cycle leading back to it.
-        '''
+        """
         group_children_map = self.inventory.get_group_children_map()
         parent_pks_to_check = set([self.pk])
         parent_pks_checked = set()
@@ -766,9 +739,9 @@ class Group(CommonModelNameNotUnique, RelatedJobsMixin):
         return self.get_all_children()
 
     def get_all_hosts(self, except_group_pks=None):
-        '''
+        """
         Return all hosts associated with this group or any of its children.
-        '''
+        """
         group_children_map = self.inventory.get_group_children_map()
         group_hosts_map = self.inventory.get_group_hosts_map()
         parent_pks_to_check = set([self.pk])
@@ -791,37 +764,43 @@ class Group(CommonModelNameNotUnique, RelatedJobsMixin):
     @property
     def job_host_summaries(self):
         from awx.main.models.jobs import JobHostSummary
+
         return JobHostSummary.objects.filter(host__in=self.all_hosts)
 
     @property
     def job_events(self):
         from awx.main.models.jobs import JobEvent
+
         return JobEvent.objects.filter(host__in=self.all_hosts)
 
     @property
     def ad_hoc_commands(self):
         from awx.main.models.ad_hoc_commands import AdHocCommand
+
         return AdHocCommand.objects.filter(hosts__in=self.all_hosts)
 
     '''
     RelatedJobsMixin
     '''
+
     def _get_related_jobs(self):
-        return UnifiedJob.objects.non_polymorphic().filter(
-            Q(Job___inventory=self.inventory) |
-            Q(InventoryUpdate___inventory_source__groups=self)
-        )
+        return UnifiedJob.objects.non_polymorphic().filter(Q(job__inventory=self.inventory) | Q(inventoryupdate__inventory_source__groups=self))
+
+
+class HostMetric(models.Model):
+    hostname = models.CharField(primary_key=True, max_length=512)
+    first_automation = models.DateTimeField(auto_now_add=True, null=False, db_index=True, help_text=_('When the host was first automated against'))
+    last_automation = models.DateTimeField(db_index=True, help_text=_('When the host was last automated against'))
 
 
 class InventorySourceOptions(BaseModel):
-    '''
+    """
     Common fields for InventorySource and InventoryUpdate.
-    '''
+    """
 
     injectors = dict()
 
     SOURCE_CHOICES = [
-        ('', _('Manual')),
         ('file', _('File, Directory or Script')),
         ('scm', _('Sourced from a Project')),
         ('ec2', _('Amazon EC2')),
@@ -829,11 +808,10 @@ class InventorySourceOptions(BaseModel):
         ('azure_rm', _('Microsoft Azure Resource Manager')),
         ('vmware', _('VMware vCenter')),
         ('satellite6', _('Red Hat Satellite 6')),
-        ('cloudforms', _('Red Hat CloudForms')),
         ('openstack', _('OpenStack')),
         ('rhv', _('Red Hat Virtualization')),
-        ('tower', _('Ansible Tower')),
-        ('custom', _('Custom Script')),
+        ('controller', _('Red Hat Ansible Automation Platform')),
+        ('insights', _('Red Hat Insights')),
     ]
 
     # From the options of the Django management base command
@@ -843,131 +821,61 @@ class InventorySourceOptions(BaseModel):
         (2, '2 (DEBUG)'),
     ]
 
-    # Use tools/scripts/get_ec2_filter_names.py to build this list.
-    INSTANCE_FILTER_NAMES = [
-        "architecture",
-        "association.allocation-id",
-        "association.association-id",
-        "association.ip-owner-id",
-        "association.public-ip",
-        "availability-zone",
-        "block-device-mapping.attach-time",
-        "block-device-mapping.delete-on-termination",
-        "block-device-mapping.device-name",
-        "block-device-mapping.status",
-        "block-device-mapping.volume-id",
-        "client-token",
-        "dns-name",
-        "group-id",
-        "group-name",
-        "hypervisor",
-        "iam-instance-profile.arn",
-        "image-id",
-        "instance-id",
-        "instance-lifecycle",
-        "instance-state-code",
-        "instance-state-name",
-        "instance-type",
-        "instance.group-id",
-        "instance.group-name",
-        "ip-address",
-        "kernel-id",
-        "key-name",
-        "launch-index",
-        "launch-time",
-        "monitoring-state",
-        "network-interface-private-dns-name",
-        "network-interface.addresses.association.ip-owner-id",
-        "network-interface.addresses.association.public-ip",
-        "network-interface.addresses.primary",
-        "network-interface.addresses.private-ip-address",
-        "network-interface.attachment.attach-time",
-        "network-interface.attachment.attachment-id",
-        "network-interface.attachment.delete-on-termination",
-        "network-interface.attachment.device-index",
-        "network-interface.attachment.instance-id",
-        "network-interface.attachment.instance-owner-id",
-        "network-interface.attachment.status",
-        "network-interface.availability-zone",
-        "network-interface.description",
-        "network-interface.group-id",
-        "network-interface.group-name",
-        "network-interface.mac-address",
-        "network-interface.network-interface.id",
-        "network-interface.owner-id",
-        "network-interface.requester-id",
-        "network-interface.requester-managed",
-        "network-interface.source-destination-check",
-        "network-interface.status",
-        "network-interface.subnet-id",
-        "network-interface.vpc-id",
-        "owner-id",
-        "placement-group-name",
-        "platform",
-        "private-dns-name",
-        "private-ip-address",
-        "product-code",
-        "product-code.type",
-        "ramdisk-id",
-        "reason",
-        "requester-id",
-        "reservation-id",
-        "root-device-name",
-        "root-device-type",
-        "source-dest-check",
-        "spot-instance-request-id",
-        "state-reason-code",
-        "state-reason-message",
-        "subnet-id",
-        "tag-key",
-        "tag-value",
-        "tenancy",
-        "virtualization-type",
-        "vpc-id"
-    ]
-
     class Meta:
         abstract = True
 
     source = models.CharField(
         max_length=32,
         choices=SOURCE_CHOICES,
-        blank=True,
-        default='',
+        blank=False,
+        default=None,
     )
     source_path = models.CharField(
         max_length=1024,
         blank=True,
         default='',
     )
-    source_script = models.ForeignKey(
-        'CustomInventoryScript',
-        null=True,
-        default=None,
-        blank=True,
-        on_delete=models.SET_NULL,
-    )
     source_vars = models.TextField(
         blank=True,
         default='',
         help_text=_('Inventory source variables in YAML or JSON format.'),
     )
-    source_regions = models.CharField(
-        max_length=1024,
+    enabled_var = models.TextField(
         blank=True,
         default='',
+        help_text=_(
+            'Retrieve the enabled state from the given dict of host '
+            'variables. The enabled variable may be specified as "foo.bar", '
+            'in which case the lookup will traverse into nested dicts, '
+            'equivalent to: from_dict.get("foo", {}).get("bar", default)'
+        ),
     )
-    instance_filters = models.CharField(
-        max_length=1024,
+    enabled_value = models.TextField(
         blank=True,
         default='',
-        help_text=_('Comma-separated list of filter expressions (EC2 only). Hosts are imported when ANY of the filters match.'),
+        help_text=_(
+            'Only used when enabled_var is set. Value when the host is '
+            'considered enabled. For example if enabled_var="status.power_state"'
+            'and enabled_value="powered_on" with host variables:'
+            '{'
+            '   "status": {'
+            '     "power_state": "powered_on",'
+            '     "created": "2020-08-04T18:13:04+00:00",'
+            '     "healthy": true'
+            '    },'
+            '    "name": "foobar",'
+            '    "ip_address": "192.168.2.1"'
+            '}'
+            'The host would be marked enabled. If power_state where any '
+            'value other than powered_on then the host would be disabled '
+            'when imported. If the key is not found then the '
+            'host will be enabled'
+        ),
     )
-    group_by = models.CharField(
-        max_length=1024,
+    host_filter = models.TextField(
         blank=True,
         default='',
-        help_text=_('Limit groups automatically created from inventory source (EC2 only).'),
+        help_text=_('Regex where only matching hosts will be imported.'),
     )
     overwrite = models.BooleanField(
         default=False,
@@ -988,102 +896,6 @@ class InventorySourceOptions(BaseModel):
         default=1,
     )
 
-    @classmethod
-    def get_ec2_region_choices(cls):
-        ec2_region_names = getattr(settings, 'EC2_REGION_NAMES', {})
-        ec2_name_replacements = {
-            'us': 'US',
-            'ap': 'Asia Pacific',
-            'eu': 'Europe',
-            'sa': 'South America',
-        }
-        import boto.ec2
-        regions = [('all', 'All')]
-        for region in boto.ec2.regions():
-            label = ec2_region_names.get(region.name, '')
-            if not label:
-                label_parts = []
-                for part in region.name.split('-'):
-                    part = ec2_name_replacements.get(part.lower(), part.title())
-                    label_parts.append(part)
-                label = ' '.join(label_parts)
-            regions.append((region.name, label))
-        return sorted(regions, key=region_sorting)
-
-    @classmethod
-    def get_ec2_group_by_choices(cls):
-        return [
-            ('ami_id', _('Image ID')),
-            ('availability_zone', _('Availability Zone')),
-            ('aws_account', _('Account')),
-            ('instance_id', _('Instance ID')),
-            ('instance_state', _('Instance State')),
-            ('platform', _('Platform')),
-            ('instance_type', _('Instance Type')),
-            ('key_pair', _('Key Name')),
-            ('region', _('Region')),
-            ('security_group', _('Security Group')),
-            ('tag_keys', _('Tags')),
-            ('tag_none', _('Tag None')),
-            ('vpc_id', _('VPC ID')),
-        ]
-
-    @classmethod
-    def get_gce_region_choices(self):
-        """Return a complete list of regions in GCE, as a list of
-        two-tuples.
-        """
-        # It's not possible to get a list of regions from GCE without
-        # authenticating first.  Therefore, use a list from settings.
-        regions = list(getattr(settings, 'GCE_REGION_CHOICES', []))
-        regions.insert(0, ('all', 'All'))
-        return sorted(regions, key=region_sorting)
-
-    @classmethod
-    def get_azure_rm_region_choices(self):
-        """Return a complete list of regions in Microsoft Azure, as a list of
-        two-tuples.
-        """
-        # It's not possible to get a list of regions from Azure without
-        # authenticating first (someone reading these might think there's
-        # a pattern here!).  Therefore, you guessed it, use a list from
-        # settings.
-        regions = list(getattr(settings, 'AZURE_RM_REGION_CHOICES', []))
-        regions.insert(0, ('all', 'All'))
-        return sorted(regions, key=region_sorting)
-
-    @classmethod
-    def get_vmware_region_choices(self):
-        """Return a complete list of regions in VMware, as a list of two-tuples
-        (but note that VMware doesn't actually have regions!).
-        """
-        return [('all', 'All')]
-
-    @classmethod
-    def get_openstack_region_choices(self):
-        """I don't think openstack has regions"""
-        return [('all', 'All')]
-
-    @classmethod
-    def get_satellite6_region_choices(self):
-        """Red Hat Satellite 6 region choices (not implemented)"""
-        return [('all', 'All')]
-
-    @classmethod
-    def get_cloudforms_region_choices(self):
-        """Red Hat CloudForms region choices (not implemented)"""
-        return [('all', 'All')]
-
-    @classmethod
-    def get_rhv_region_choices(self):
-        """No region supprt"""
-        return [('all', 'All')]
-
-    @classmethod
-    def get_tower_region_choices(self):
-        """No region supprt"""
-        return [('all', 'All')]
-
     @staticmethod
     def cloud_credential_validation(source, cred):
         if not source:
@@ -1093,28 +905,20 @@ class InventorySourceOptions(BaseModel):
             # the actual inventory source being used (Amazon requires Amazon
             # credentials; Rackspace requires Rackspace credentials; etc...)
             if source.replace('ec2', 'aws') != cred.kind:
-                return _('Cloud-based inventory sources (such as %s) require '
-                         'credentials for the matching cloud service.') % source
+                return _('Cloud-based inventory sources (such as %s) require ' 'credentials for the matching cloud service.') % source
         # Allow an EC2 source to omit the credential.  If Tower is running on
         # an EC2 instance with an IAM Role assigned, boto will use credentials
         # from the instance metadata instead of those explicitly provided.
         elif source in CLOUD_PROVIDERS and source != 'ec2':
             return _('Credential is required for a cloud source.')
         elif source == 'custom' and cred and cred.credential_type.kind in ('scm', 'ssh', 'insights', 'vault'):
-            return _(
-                'Credentials of type machine, source control, insights and vault are '
-                'disallowed for custom inventory sources.'
-            )
+            return _('Credentials of type machine, source control, insights and vault are ' 'disallowed for custom inventory sources.')
         elif source == 'scm' and cred and cred.credential_type.kind in ('insights', 'vault'):
-            return _(
-                'Credentials of type insights and vault are '
-                'disallowed for scm inventory sources.'
-            )
+            return _('Credentials of type insights and vault are ' 'disallowed for scm inventory sources.')
         return None
 
     def get_cloud_credential(self):
-        """Return the credential which is directly tied to the inventory source type.
-        """
+        """Return the credential which is directly tied to the inventory source type."""
         credential = None
         for cred in self.credentials.all():
             if self.source in CLOUD_PROVIDERS:
@@ -1148,77 +952,7 @@ class InventorySourceOptions(BaseModel):
         if cred is not None:
             return cred.pk
 
-    def clean_source_regions(self):
-        regions = self.source_regions
-
-        if self.source in CLOUD_PROVIDERS:
-            get_regions = getattr(self, 'get_%s_region_choices' % self.source)
-            valid_regions = [x[0] for x in get_regions()]
-            region_transform = lambda x: x.strip().lower()
-        else:
-            return ''
-        all_region = region_transform('all')
-        valid_regions = [region_transform(x) for x in valid_regions]
-        regions = [region_transform(x) for x in regions.split(',') if x.strip()]
-        if all_region in regions:
-            return all_region
-        invalid_regions = []
-        for r in regions:
-            if r not in valid_regions and r not in invalid_regions:
-                invalid_regions.append(r)
-        if invalid_regions:
-            raise ValidationError(_('Invalid %(source)s region: %(region)s') % {
-                'source': self.source, 'region': ', '.join(invalid_regions)})
-        return ','.join(regions)
-
     source_vars_dict = VarsDictProperty('source_vars')
-
-    def clean_instance_filters(self):
-        instance_filters = str(self.instance_filters or '')
-        if self.source == 'ec2':
-            invalid_filters = []
-            instance_filter_re = re.compile(r'^((tag:.+)|([a-z][a-z\.-]*[a-z]))=.*$')
-            for instance_filter in instance_filters.split(','):
-                instance_filter = instance_filter.strip()
-                if not instance_filter:
-                    continue
-                if not instance_filter_re.match(instance_filter):
-                    invalid_filters.append(instance_filter)
-                    continue
-                instance_filter_name = instance_filter.split('=', 1)[0]
-                if instance_filter_name.startswith('tag:'):
-                    continue
-                if instance_filter_name not in self.INSTANCE_FILTER_NAMES:
-                    invalid_filters.append(instance_filter)
-            if invalid_filters:
-                raise ValidationError(_('Invalid filter expression: %(filter)s') %
-                                      {'filter': ', '.join(invalid_filters)})
-            return instance_filters
-        elif self.source in ('vmware', 'tower'):
-            return instance_filters
-        else:
-            return ''
-
-    def clean_group_by(self):
-        group_by = str(self.group_by or '')
-        if self.source == 'ec2':
-            get_choices = getattr(self, 'get_%s_group_by_choices' % self.source)
-            valid_choices = [x[0] for x in get_choices()]
-            choice_transform = lambda x: x.strip().lower()
-            valid_choices = [choice_transform(x) for x in valid_choices]
-            choices = [choice_transform(x) for x in group_by.split(',') if x.strip()]
-            invalid_choices = []
-            for c in choices:
-                if c not in valid_choices and c not in invalid_choices:
-                    invalid_choices.append(c)
-            if invalid_choices:
-                raise ValidationError(_('Invalid group by choice: %(choice)s') %
-                                      {'choice': ', '.join(invalid_choices)})
-            return ','.join(choices)
-        elif self.source == 'vmware':
-            return group_by
-        else:
-            return ''
 
 
 class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualEnvMixin, RelatedJobsMixin):
@@ -1237,14 +971,6 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualE
         on_delete=models.CASCADE,
     )
 
-    deprecated_group = models.OneToOneField(
-        'Group',
-        related_name='deprecated_inventory_source',
-        null=True,
-        default=None,
-        on_delete=models.CASCADE,
-    )
-
     source_project = models.ForeignKey(
         'Project',
         related_name='scm_inventory_sources',
@@ -1252,7 +978,7 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualE
         on_delete=models.CASCADE,
         blank=True,
         default=None,
-        null=True
+        null=True,
     )
     scm_last_revision = models.CharField(
         max_length=1024,
@@ -1276,11 +1002,13 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualE
 
     @classmethod
     def _get_unified_job_field_names(cls):
-        return set(f.name for f in InventorySourceOptions._meta.fields) | set(
-            ['name', 'description', 'credentials', 'inventory']
-        )
+        return set(f.name for f in InventorySourceOptions._meta.fields) | set(['name', 'description', 'organization', 'credentials', 'inventory'])
 
     def save(self, *args, **kwargs):
+        # if this is a new object, inherit organization from its inventory
+        if not self.pk and self.inventory and self.inventory.organization_id and not self.organization_id:
+            self.organization_id = self.inventory.organization_id
+
         # If update_fields has been specified, add our field names to it,
         # if it hasn't been specified, then we're just doing a normal save.
         update_fields = kwargs.get('update_fields', [])
@@ -1302,7 +1030,7 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualE
             if 'name' not in update_fields:
                 update_fields.append('name')
         # Reset revision if SCM source has changed parameters
-        if self.source=='scm' and not is_new_instance:
+        if self.source == 'scm' and not is_new_instance:
             before_is = self.__class__.objects.get(pk=self.pk)
             if before_is.source_path != self.source_path or before_is.source_project_id != self.source_project_id:
                 # Reset the scm_revision if file changed to force update
@@ -1317,10 +1045,9 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualE
         if replace_text in self.name:
             self.name = self.name.replace(replace_text, str(self.pk))
             super(InventorySource, self).save(update_fields=['name'])
-        if self.source=='scm' and is_new_instance and self.update_on_project_update:
+        if self.source == 'scm' and is_new_instance and self.update_on_project_update:
             # Schedule a new Project update if one is not already queued
-            if self.source_project and not self.source_project.project_updates.filter(
-                    status__in=['new', 'pending', 'waiting']).exists():
+            if self.source_project and not self.source_project.project_updates.filter(status__in=['new', 'pending', 'waiting']).exists():
                 self.update()
         if not getattr(_inventory_updates, 'is_updating', False):
             if self.inventory is not None:
@@ -1369,7 +1096,7 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualE
                 name = '{} - {}'.format(self.inventory.name, self.name)
                 name_field = self._meta.get_field('name')
                 if len(name) > name_field.max_length:
-                    name = name[:name_field.max_length]
+                    name = name[: name_field.max_length]
                 kwargs['_eager_fields']['name'] = name
         return super(InventorySource, self).create_unified_job(**kwargs)
 
@@ -1393,49 +1120,41 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualE
     @property
     def notification_templates(self):
         base_notification_templates = NotificationTemplate.objects
-        error_notification_templates = list(base_notification_templates
-                                            .filter(unifiedjobtemplate_notification_templates_for_errors__in=[self]))
-        started_notification_templates = list(base_notification_templates
-                                              .filter(unifiedjobtemplate_notification_templates_for_started__in=[self]))
-        success_notification_templates = list(base_notification_templates
-                                              .filter(unifiedjobtemplate_notification_templates_for_success__in=[self]))
+        error_notification_templates = list(base_notification_templates.filter(unifiedjobtemplate_notification_templates_for_errors__in=[self]))
+        started_notification_templates = list(base_notification_templates.filter(unifiedjobtemplate_notification_templates_for_started__in=[self]))
+        success_notification_templates = list(base_notification_templates.filter(unifiedjobtemplate_notification_templates_for_success__in=[self]))
         if self.inventory.organization is not None:
-            error_notification_templates = set(error_notification_templates + list(base_notification_templates
-                                               .filter(organization_notification_templates_for_errors=self.inventory.organization)))
-            started_notification_templates = set(started_notification_templates + list(base_notification_templates
-                                                 .filter(organization_notification_templates_for_started=self.inventory.organization)))
-            success_notification_templates = set(success_notification_templates + list(base_notification_templates
-                                                 .filter(organization_notification_templates_for_success=self.inventory.organization)))
-        return dict(error=list(error_notification_templates),
-                    started=list(started_notification_templates),
-                    success=list(success_notification_templates))
-
-    def clean_source(self):  # TODO: remove in 3.3
-        source = self.source
-        if source and self.deprecated_group:
-            qs = self.deprecated_group.inventory_sources.filter(source__in=CLOUD_INVENTORY_SOURCES)
-            existing_sources = qs.exclude(pk=self.pk)
-            if existing_sources.count():
-                s = u', '.join([x.deprecated_group.name for x in existing_sources])
-                raise ValidationError(_('Unable to configure this item for cloud sync. It is already managed by %s.') % s)
-        return source
+            error_notification_templates = set(
+                error_notification_templates
+                + list(base_notification_templates.filter(organization_notification_templates_for_errors=self.inventory.organization))
+            )
+            started_notification_templates = set(
+                started_notification_templates
+                + list(base_notification_templates.filter(organization_notification_templates_for_started=self.inventory.organization))
+            )
+            success_notification_templates = set(
+                success_notification_templates
+                + list(base_notification_templates.filter(organization_notification_templates_for_success=self.inventory.organization))
+            )
+        return dict(error=list(error_notification_templates), started=list(started_notification_templates), success=list(success_notification_templates))
 
     def clean_update_on_project_update(self):
-        if self.update_on_project_update is True and \
-                self.source == 'scm' and \
-                InventorySource.objects.filter(
-                    Q(inventory=self.inventory,
-                        update_on_project_update=True, source='scm') &
-                    ~Q(id=self.id)).exists():
+        if (
+            self.update_on_project_update is True
+            and self.source == 'scm'
+            and InventorySource.objects.filter(Q(inventory=self.inventory, update_on_project_update=True, source='scm') & ~Q(id=self.id)).exists()
+        ):
             raise ValidationError(_("More than one SCM-based inventory source with update on project update per-inventory not allowed."))
         return self.update_on_project_update
 
     def clean_update_on_launch(self):
-        if self.update_on_project_update is True and \
-                self.source == 'scm' and \
-                self.update_on_launch is True:
-            raise ValidationError(_("Cannot update SCM-based inventory source on launch if set to update on project update. "
-                                    "Instead, configure the corresponding source project to update on launch."))
+        if self.update_on_project_update is True and self.source == 'scm' and self.update_on_launch is True:
+            raise ValidationError(
+                _(
+                    "Cannot update SCM-based inventory source on launch if set to update on project update. "
+                    "Instead, configure the corresponding source project to update on launch."
+                )
+            )
         return self.update_on_launch
 
     def clean_source_path(self):
@@ -1446,14 +1165,15 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, CustomVirtualE
     '''
     RelatedJobsMixin
     '''
+
     def _get_related_jobs(self):
         return InventoryUpdate.objects.filter(inventory_source=self)
 
 
 class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, TaskManagerInventoryUpdateMixin, CustomVirtualEnvMixin):
-    '''
+    """
     Internal job for tracking inventory updates from external sources.
-    '''
+    """
 
     class Meta:
         app_label = 'main'
@@ -1487,8 +1207,16 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
         on_delete=models.CASCADE,
         blank=True,
         default=None,
-        null=True
+        null=True,
     )
+
+    @property
+    def is_container_group_task(self):
+        return bool(self.instance_group and self.instance_group.is_container_group)
+
+    @property
+    def can_run_containerized(self):
+        return True
 
     def _get_parent_field_name(self):
         return 'inventory_source'
@@ -1496,6 +1224,7 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
     @classmethod
     def _get_task_class(cls):
         from awx.main.tasks import RunInventoryUpdate
+
         return RunInventoryUpdate
 
     def _global_timeout_setting(self):
@@ -1508,8 +1237,6 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
         if self.inventory_source.inventory is not None:
             websocket_data.update(dict(inventory_id=self.inventory_source.inventory.pk))
 
-        if self.inventory_source.deprecated_group is not None:  # TODO: remove in 3.3
-            websocket_data.update(dict(group_id=self.inventory_source.deprecated_group.id))
         return websocket_data
 
     def get_absolute_url(self, request=None):
@@ -1522,12 +1249,12 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
         '''Alias to source_path that combines with project path for for SCM file based sources'''
         if self.inventory_source_id is None or self.inventory_source.source_project_id is None:
             return self.source_path
-        return os.path.join(
-            self.inventory_source.source_project.get_project_path(check_if_exists=False),
-            self.source_path)
+        return os.path.join(self.inventory_source.source_project.get_project_path(check_if_exists=False), self.source_path)
 
     @property
     def event_class(self):
+        if self.has_unpartitioned_events:
+            return UnpartitionedInventoryUpdateEvent
         return InventoryUpdateEvent
 
     @property
@@ -1547,6 +1274,7 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
     '''
     JobNotificationMixin
     '''
+
     def get_notification_templates(self):
         return self.inventory_source.notification_templates
 
@@ -1568,16 +1296,6 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
             return self.global_instance_groups
         return selected_groups
 
-    @property
-    def ansible_virtualenv_path(self):
-        if self.inventory_source and self.inventory_source.custom_virtualenv:
-            return self.inventory_source.custom_virtualenv
-        if self.inventory_source and self.inventory_source.source_project:
-            project = self.inventory_source.source_project
-            if project and project.custom_virtualenv:
-                return project.custom_virtualenv
-        return settings.ANSIBLE_VENV_PATH
-
     def cancel(self, job_explanation=None, is_chain=False):
         res = super(InventoryUpdate, self).cancel(job_explanation=job_explanation, is_chain=is_chain)
         if res:
@@ -1587,52 +1305,39 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
 
 
 class CustomInventoryScript(CommonModelNameNotUnique, ResourceMixin):
-
     class Meta:
         app_label = 'main'
-        unique_together = [('name', 'organization')]
         ordering = ('name',)
 
-    script = prevent_search(models.TextField(
-        blank=True,
-        default='',
-        help_text=_('Inventory script contents'),
-    ))
-    organization = models.ForeignKey(
-        'Organization',
-        related_name='custom_inventory_scripts',
-        help_text=_('Organization owning this inventory script'),
-        blank=False,
-        null=True,
-        on_delete=models.SET_NULL,
-    )
-
-    admin_role = ImplicitRoleField(
-        parent_role='organization.admin_role',
-    )
-    read_role = ImplicitRoleField(
-        parent_role=['organization.auditor_role', 'organization.member_role', 'admin_role'],
+    script = prevent_search(
+        models.TextField(
+            blank=True,
+            default='',
+            help_text=_('Inventory script contents'),
+        )
     )
 
     def get_absolute_url(self, request=None):
         return reverse('api:inventory_script_detail', kwargs={'pk': self.pk}, request=request)
 
 
-# TODO: move to awx/main/models/inventory/injectors.py
 class PluginFileInjector(object):
-    # if plugin_name is not given, no inventory plugin functionality exists
     plugin_name = None  # Ansible core name used to reference plugin
-    # if initial_version is None, but we have plugin name, injection logic exists,
-    # but it is vaporware, meaning we do not use it for some reason in Ansible core
-    initial_version = None  # at what version do we switch to the plugin
-    ini_env_reference = None  # env var name that points to old ini config file
     # base injector should be one of None, "managed", or "template"
     # this dictates which logic to borrow from playbook injectors
     base_injector = None
+    # every source should have collection, these are for the collection name
+    namespace = None
+    collection = None
+    collection_migration = '2.9'  # Starting with this version, we use collections
+    use_fqcn = False  # plugin: name versus plugin: namespace.collection.name
 
-    def __init__(self, ansible_version):
-        # This is InventoryOptions instance, could be source or inventory update
-        self.ansible_version = ansible_version
+    # TODO: delete this method and update unit tests
+    @classmethod
+    def get_proper_name(cls):
+        if cls.plugin_name is None:
+            return None
+        return f'{cls.namespace}.{cls.collection}.{cls.plugin_name}'
 
     @property
     def filename(self):
@@ -1641,51 +1346,34 @@ class PluginFileInjector(object):
         """
         return '{0}.yml'.format(self.plugin_name)
 
-    @property
-    def script_name(self):
-        """Name of the script located in awx/plugins/inventory
-        """
-        return '{0}.py'.format(self.__class__.__name__)
+    def inventory_contents(self, inventory_update, private_data_dir):
+        """Returns a string that is the content for the inventory file for the inventory plugin"""
+        return yaml.safe_dump(self.inventory_as_dict(inventory_update, private_data_dir), default_flow_style=False, width=1000)
 
     def inventory_as_dict(self, inventory_update, private_data_dir):
-        """Default implementation of inventory plugin file contents.
-        There are some valid cases when all parameters can be obtained from
-        the environment variables, example "plugin: linode" is valid
-        ideally, however, some options should be filled from the inventory source data
-        """
-        if self.plugin_name is None:
-            raise NotImplementedError('At minimum the plugin name is needed for inventory plugin use.')
-        return {'plugin': self.plugin_name}
-
-    def inventory_contents(self, inventory_update, private_data_dir):
-        """Returns a string that is the content for the inventory file for the inventory plugin
-        """
-        return yaml.safe_dump(
-            self.inventory_as_dict(inventory_update, private_data_dir),
-            default_flow_style=False,
-            width=1000
-        )
-
-    def should_use_plugin(self):
-        return bool(
-            self.plugin_name and self.initial_version and
-            Version(self.ansible_version) >= Version(self.initial_version)
-        )
+        source_vars = dict(inventory_update.source_vars_dict)  # make a copy
+        '''
+        None conveys that we should use the user-provided plugin.
+        Note that a plugin value of '' should still be overridden.
+        '''
+        if self.plugin_name is not None:
+            if hasattr(self, 'downstream_namespace') and server_product_name() != 'AWX':
+                source_vars['plugin'] = f'{self.downstream_namespace}.{self.downstream_collection}.{self.plugin_name}'
+            elif self.use_fqcn:
+                source_vars['plugin'] = f'{self.namespace}.{self.collection}.{self.plugin_name}'
+            else:
+                source_vars['plugin'] = self.plugin_name
+        return source_vars
 
     def build_env(self, inventory_update, env, private_data_dir, private_data_files):
-        if self.should_use_plugin():
-            injector_env = self.get_plugin_env(inventory_update, private_data_dir, private_data_files)
-        else:
-            injector_env = self.get_script_env(inventory_update, private_data_dir, private_data_files)
+        injector_env = self.get_plugin_env(inventory_update, private_data_dir, private_data_files)
         env.update(injector_env)
         # Preserves current behavior for Ansible change in default planned for 2.10
         env['ANSIBLE_TRANSFORM_INVALID_GROUP_CHARS'] = 'never'
         return env
 
     def _get_shared_env(self, inventory_update, private_data_dir, private_data_files):
-        """By default, we will apply the standard managed_by_tower injectors
-        for the script injection
-        """
+        """By default, we will apply the standard managed injectors"""
         injected_env = {}
         credential = inventory_update.get_cloud_credential()
         # some sources may have no credential, specifically ec2
@@ -1695,66 +1383,35 @@ class PluginFileInjector(object):
             injected_env['INVENTORY_UPDATE_ID'] = str(inventory_update.pk)  # so injector knows this is inventory
         if self.base_injector == 'managed':
             from awx.main.models.credential import injectors as builtin_injectors
+
             cred_kind = inventory_update.source.replace('ec2', 'aws')
             if cred_kind in dir(builtin_injectors):
                 getattr(builtin_injectors, cred_kind)(credential, injected_env, private_data_dir)
         elif self.base_injector == 'template':
             safe_env = injected_env.copy()
             args = []
-            credential.credential_type.inject_credential(
-                credential, injected_env, safe_env, args, private_data_dir
-            )
+            credential.credential_type.inject_credential(credential, injected_env, safe_env, args, private_data_dir)
             # NOTE: safe_env is handled externally to injector class by build_safe_env static method
-            # that means that managed_by_tower injectors must only inject detectable env keys
+            # that means that managed injectors must only inject detectable env keys
             # enforcement of this is accomplished by tests
         return injected_env
 
     def get_plugin_env(self, inventory_update, private_data_dir, private_data_files):
-        return self._get_shared_env(inventory_update, private_data_dir, private_data_files)
-
-    def get_script_env(self, inventory_update, private_data_dir, private_data_files):
-        injected_env = self._get_shared_env(inventory_update, private_data_dir, private_data_files)
-
-        # Put in env var reference to private ini data files, if relevant
-        if self.ini_env_reference:
-            credential = inventory_update.get_cloud_credential()
-            cred_data = private_data_files['credentials']
-            injected_env[self.ini_env_reference] = cred_data[credential]
-
-        return injected_env
+        env = self._get_shared_env(inventory_update, private_data_dir, private_data_files)
+        return env
 
     def build_private_data(self, inventory_update, private_data_dir):
-        if self.should_use_plugin():
-            return self.build_plugin_private_data(inventory_update, private_data_dir)
-        else:
-            return self.build_script_private_data(inventory_update, private_data_dir)
-
-    def build_script_private_data(self, inventory_update, private_data_dir):
-        return None
+        return self.build_plugin_private_data(inventory_update, private_data_dir)
 
     def build_plugin_private_data(self, inventory_update, private_data_dir):
         return None
 
-    @staticmethod
-    def dump_cp(cp, credential):
-        """Dump config parser data and return it as a string.
-        Helper method intended for use by build_script_private_data
-        """
-        if cp.sections():
-            f = StringIO()
-            cp.write(f)
-            private_data = {'credentials': {}}
-            private_data['credentials'][credential] = f.getvalue()
-            return private_data
-        else:
-            return None
-
 
 class azure_rm(PluginFileInjector):
     plugin_name = 'azure_rm'
-    initial_version = '2.8'  # Driven by unsafe group names issue, hostvars, host names
-    ini_env_reference = 'AZURE_INI_PATH'
     base_injector = 'managed'
+    namespace = 'azure'
+    collection = 'azcollection'
 
     def get_plugin_env(self, *args, **kwargs):
         ret = super(azure_rm, self).get_plugin_env(*args, **kwargs)
@@ -1762,133 +1419,12 @@ class azure_rm(PluginFileInjector):
         ret['ANSIBLE_JINJA2_NATIVE'] = str(True)
         return ret
 
-    def inventory_as_dict(self, inventory_update, private_data_dir):
-        ret = super(azure_rm, self).inventory_as_dict(inventory_update, private_data_dir)
-
-        source_vars = inventory_update.source_vars_dict
-
-        ret['fail_on_template_errors'] = False
-
-        group_by_hostvar = {
-            'location': {'prefix': '', 'separator': '', 'key': 'location'},
-            'tag': {'prefix': '', 'separator': '', 'key': 'tags.keys() | list if tags else []'},
-            # Introduced with https://github.com/ansible/ansible/pull/53046
-            'security_group': {'prefix': '', 'separator': '', 'key': 'security_group'},
-            'resource_group': {'prefix': '', 'separator': '', 'key': 'resource_group'},
-            # Note, os_family was not documented correctly in script, but defaulted to grouping by it
-            'os_family': {'prefix': '', 'separator': '', 'key': 'os_disk.operating_system_type'}
-        }
-        # by default group by everything
-        # always respect user setting, if they gave it
-        group_by = [
-            grouping_name for grouping_name in group_by_hostvar
-            if source_vars.get('group_by_{}'.format(grouping_name), True)
-        ]
-        ret['keyed_groups'] = [group_by_hostvar[grouping_name] for grouping_name in group_by]
-        if 'tag' in group_by:
-            # Nasty syntax to reproduce "key_value" group names in addition to "key"
-            ret['keyed_groups'].append({
-                'prefix': '', 'separator': '',
-                'key': r'dict(tags.keys() | map("regex_replace", "^(.*)$", "\1_") | list | zip(tags.values() | list)) if tags else []'
-            })
-
-        # Compatibility content
-        # TODO: add proper support for instance_filters non-specific to compatibility
-        # TODO: add proper support for group_by non-specific to compatibility
-        # Dashes were not configurable in azure_rm.py script, we do not want unicode, so always use this
-        ret['use_contrib_script_compatible_sanitization'] = True
-        # use same host names as script
-        ret['plain_host_names'] = True
-        # By default the script did not filter hosts
-        ret['default_host_filters'] = []
-        # User-given host filters
-        user_filters = []
-        old_filterables = [
-            ('resource_groups', 'resource_group'),
-            ('tags', 'tags')
-            # locations / location would be an entry
-            # but this would conflict with source_regions
-        ]
-        for key, loc in old_filterables:
-            value = source_vars.get(key, None)
-            if value and isinstance(value, str):
-                # tags can be list of key:value pairs
-                #  e.g. 'Creator:jmarshall, peanutbutter:jelly'
-                # or tags can be a list of keys
-                #  e.g. 'Creator, peanutbutter'
-                if key == "tags":
-                    # grab each key value pair
-                    for kvpair in value.split(','):
-                        # split into key and value
-                        kv = kvpair.split(':')
-                        # filter out any host that does not have key
-                        # in their tags.keys() variable
-                        user_filters.append('"{}" not in tags.keys()'.format(kv[0].strip()))
-                        # if a value is provided, check that the key:value pair matches
-                        if len(kv) > 1:
-                            user_filters.append('tags["{}"] != "{}"'.format(kv[0].strip(), kv[1].strip()))
-                else:
-                    user_filters.append('{} not in {}'.format(
-                        loc, value.split(',')
-                    ))
-        if user_filters:
-            ret.setdefault('exclude_host_filters', [])
-            ret['exclude_host_filters'].extend(user_filters)
-
-        ret['conditional_groups'] = {'azure': True}
-        ret['hostvar_expressions'] = {
-            'provisioning_state': 'provisioning_state | title',
-            'computer_name': 'name',
-            'type': 'resource_type',
-            'private_ip': 'private_ipv4_addresses[0] if private_ipv4_addresses else None',
-            'public_ip': 'public_ipv4_addresses[0] if public_ipv4_addresses else None',
-            'public_ip_name': 'public_ip_name if public_ip_name is defined else None',
-            'public_ip_id': 'public_ip_id if public_ip_id is defined else None',
-            'tags': 'tags if tags else None'
-        }
-        # Special functionality from script
-        if source_vars.get('use_private_ip', False):
-            ret['hostvar_expressions']['ansible_host'] = 'private_ipv4_addresses[0]'
-        # end compatibility content
-
-        if inventory_update.source_regions and 'all' not in inventory_update.source_regions:
-            # initialize a list for this section in inventory file
-            ret.setdefault('exclude_host_filters', [])
-            # make a python list of the regions we will use
-            python_regions = [x.strip() for x in inventory_update.source_regions.split(',')]
-            # convert that list in memory to python syntax in a string
-            # now put that in jinja2 syntax operating on hostvar key "location"
-            # and put that as an entry in the exclusions list
-            ret['exclude_host_filters'].append("location not in {}".format(repr(python_regions)))
-        return ret
-
-    def build_script_private_data(self, inventory_update, private_data_dir):
-        cp = configparser.RawConfigParser()
-        section = 'azure'
-        cp.add_section(section)
-        cp.set(section, 'include_powerstate', 'yes')
-        cp.set(section, 'group_by_resource_group', 'yes')
-        cp.set(section, 'group_by_location', 'yes')
-        cp.set(section, 'group_by_tag', 'yes')
-
-        if inventory_update.source_regions and 'all' not in inventory_update.source_regions:
-            cp.set(
-                section, 'locations',
-                ','.join([x.strip() for x in inventory_update.source_regions.split(',')])
-            )
-
-        azure_rm_opts = dict(inventory_update.source_vars_dict.items())
-        for k, v in azure_rm_opts.items():
-            cp.set(section, k, str(v))
-        return self.dump_cp(cp, inventory_update.get_cloud_credential())
-
 
 class ec2(PluginFileInjector):
     plugin_name = 'aws_ec2'
-    # blocked by https://github.com/ansible/ansible/issues/54059
-    # initial_version = '2.8'  # Driven by unsafe group names issue, parent_group templating, hostvars
-    ini_env_reference = 'EC2_INI_PATH'
     base_injector = 'managed'
+    namespace = 'amazon'
+    collection = 'aws'
 
     def get_plugin_env(self, *args, **kwargs):
         ret = super(ec2, self).get_plugin_env(*args, **kwargs)
@@ -1896,235 +1432,12 @@ class ec2(PluginFileInjector):
         ret['ANSIBLE_JINJA2_NATIVE'] = str(True)
         return ret
 
-    def _compat_compose_vars(self):
-        return {
-            # vars that change
-            'ec2_block_devices': (
-                "dict(block_device_mappings | map(attribute='device_name') | list | zip(block_device_mappings "
-                "| map(attribute='ebs.volume_id') | list))"
-            ),
-            'ec2_dns_name': 'public_dns_name',
-            'ec2_group_name': 'placement.group_name',
-            'ec2_instance_profile': 'iam_instance_profile | default("")',
-            'ec2_ip_address': 'public_ip_address',
-            'ec2_kernel': 'kernel_id | default("")',
-            'ec2_monitored':  "monitoring.state in ['enabled', 'pending']",
-            'ec2_monitoring_state': 'monitoring.state',
-            'ec2_placement': 'placement.availability_zone',
-            'ec2_ramdisk': 'ramdisk_id | default("")',
-            'ec2_reason': 'state_transition_reason',
-            'ec2_security_group_ids': "security_groups | map(attribute='group_id') | list |  join(',')",
-            'ec2_security_group_names': "security_groups | map(attribute='group_name') | list |  join(',')",
-            'ec2_tag_Name': 'tags.Name',
-            'ec2_state': 'state.name',
-            'ec2_state_code': 'state.code',
-            'ec2_state_reason': 'state_reason.message if state_reason is defined else ""',
-            'ec2_sourceDestCheck': 'source_dest_check | default(false) | lower | string',  # snake_case syntax intended
-            'ec2_account_id': 'owner_id',
-            # vars that just need ec2_ prefix
-            'ec2_ami_launch_index': 'ami_launch_index | string',
-            'ec2_architecture': 'architecture',
-            'ec2_client_token': 'client_token',
-            'ec2_ebs_optimized': 'ebs_optimized',
-            'ec2_hypervisor': 'hypervisor',
-            'ec2_image_id': 'image_id',
-            'ec2_instance_type': 'instance_type',
-            'ec2_key_name': 'key_name',
-            'ec2_launch_time': r'launch_time | regex_replace(" ", "T") | regex_replace("(\+)(\d\d):(\d)(\d)$", ".\g<2>\g<3>Z")',
-            'ec2_platform': 'platform | default("")',
-            'ec2_private_dns_name': 'private_dns_name',
-            'ec2_private_ip_address': 'private_ip_address',
-            'ec2_public_dns_name': 'public_dns_name',
-            'ec2_region': 'placement.region',
-            'ec2_root_device_name': 'root_device_name',
-            'ec2_root_device_type': 'root_device_type',
-            # many items need blank defaults because the script tended to keep a common schema
-            'ec2_spot_instance_request_id': 'spot_instance_request_id | default("")',
-            'ec2_subnet_id': 'subnet_id | default("")',
-            'ec2_virtualization_type': 'virtualization_type',
-            'ec2_vpc_id': 'vpc_id | default("")',
-            # same as ec2_ip_address, the script provided this
-            'ansible_host': 'public_ip_address',
-            # new with https://github.com/ansible/ansible/pull/53645
-            'ec2_eventsSet': 'events | default("")',
-            'ec2_persistent': 'persistent | default(false)',
-            'ec2_requester_id': 'requester_id | default("")'
-        }
-
-    def inventory_as_dict(self, inventory_update, private_data_dir):
-        ret = super(ec2, self).inventory_as_dict(inventory_update, private_data_dir)
-
-        keyed_groups = []
-        group_by_hostvar = {
-            'ami_id': {'prefix': '', 'separator': '', 'key': 'image_id', 'parent_group': 'images'},
-            # 2 entries for zones for same groups to establish 2 parentage trees
-            'availability_zone': {'prefix': '', 'separator': '', 'key': 'placement.availability_zone', 'parent_group': 'zones'},
-            'aws_account': {'prefix': '', 'separator': '', 'key': 'ec2_account_id', 'parent_group': 'accounts'},  # composed var
-            'instance_id': {'prefix': '', 'separator': '', 'key': 'instance_id', 'parent_group': 'instances'},  # normally turned off
-            'instance_state': {'prefix': 'instance_state', 'key': 'ec2_state', 'parent_group': 'instance_states'},  # composed var
-            # ec2_platform is a composed var, but group names do not match up to hostvar exactly
-            'platform': {'prefix': 'platform', 'key': 'platform | default("undefined")', 'parent_group': 'platforms'},
-            'instance_type': {'prefix': 'type', 'key': 'instance_type', 'parent_group': 'types'},
-            'key_pair': {'prefix': 'key', 'key': 'key_name', 'parent_group': 'keys'},
-            'region': {'prefix': '', 'separator': '', 'key': 'placement.region', 'parent_group': 'regions'},
-            # Security requires some ninja jinja2 syntax, credit to s-hertel
-            'security_group': {'prefix': 'security_group', 'key': 'security_groups | map(attribute="group_name")', 'parent_group': 'security_groups'},
-            # tags cannot be parented in exactly the same way as the script due to
-            # https://github.com/ansible/ansible/pull/53812
-            'tag_keys': [
-                {'prefix': 'tag', 'key': 'tags', 'parent_group': 'tags'},
-                {'prefix': 'tag', 'key': 'tags.keys()', 'parent_group': 'tags'}
-            ],
-            # 'tag_none': None,  # grouping by no tags isn't a different thing with plugin
-            # naming is redundant, like vpc_id_vpc_8c412cea, but intended
-            'vpc_id': {'prefix': 'vpc_id', 'key': 'vpc_id', 'parent_group': 'vpcs'},
-        }
-        # -- same-ish as script here --
-        group_by = [x.strip().lower() for x in inventory_update.group_by.split(',') if x.strip()]
-        for choice in inventory_update.get_ec2_group_by_choices():
-            value = bool((group_by and choice[0] in group_by) or (not group_by and choice[0] != 'instance_id'))
-            # -- end sameness to script --
-            if value:
-                this_keyed_group = group_by_hostvar.get(choice[0], None)
-                # If a keyed group syntax does not exist, there is nothing we can do to get this group
-                if this_keyed_group is not None:
-                    if isinstance(this_keyed_group, list):
-                        keyed_groups.extend(this_keyed_group)
-                    else:
-                        keyed_groups.append(this_keyed_group)
-        # special case, this parentage is only added if both zones and regions are present
-        if not group_by or ('region' in group_by and 'availability_zone' in group_by):
-            keyed_groups.append({'prefix': '', 'separator': '', 'key': 'placement.availability_zone', 'parent_group': '{{ placement.region }}'})
-
-        source_vars = inventory_update.source_vars_dict
-        # This is a setting from the script, hopefully no one used it
-        # if true, it replaces dashes, but not in region / loc names
-        replace_dash = bool(source_vars.get('replace_dash_in_groups', True))
-        # Compatibility content
-        legacy_regex = {
-            True: r"[^A-Za-z0-9\_]",
-            False: r"[^A-Za-z0-9\_\-]"  # do not replace dash, dash is whitelisted
-        }[replace_dash]
-        list_replacer = 'map("regex_replace", "{rx}", "_") | list'.format(rx=legacy_regex)
-        # this option, a plugin option, will allow dashes, but not unicode
-        # when set to False, unicode will be allowed, but it was not allowed by script
-        # thus, we always have to use this option, and always use our custom regex
-        ret['use_contrib_script_compatible_sanitization'] = True
-        for grouping_data in keyed_groups:
-            if grouping_data['key'] in ('placement.region', 'placement.availability_zone'):
-                # us-east-2 is always us-east-2 according to ec2.py
-                # no sanitization in region-ish groups for the script standards, ever ever
-                continue
-            if grouping_data['key'] == 'tags':
-                # dict jinja2 transformation
-                grouping_data['key'] = 'dict(tags.keys() | {replacer} | zip(tags.values() | {replacer}))'.format(
-                    replacer=list_replacer
-                )
-            elif grouping_data['key'] == 'tags.keys()' or grouping_data['prefix'] == 'security_group':
-                # list jinja2 transformation
-                grouping_data['key'] += ' | {replacer}'.format(replacer=list_replacer)
-            else:
-                # string transformation
-                grouping_data['key'] += ' | regex_replace("{rx}", "_")'.format(rx=legacy_regex)
-        # end compatibility content
-
-        # This was an allowed ec2.ini option, also plugin option, so pass through
-        if source_vars.get('boto_profile', None):
-            ret['boto_profile'] = source_vars['boto_profile']
-
-        elif not replace_dash:
-            # Using the plugin, but still want dashes whitelisted
-            ret['use_contrib_script_compatible_sanitization'] = True
-
-        if keyed_groups:
-            ret['keyed_groups'] = keyed_groups
-
-        # Instance ID not part of compat vars, because of settings.EC2_INSTANCE_ID_VAR
-        compose_dict = {'ec2_id': 'instance_id'}
-        inst_filters = {}
-
-        # Compatibility content
-        compose_dict.update(self._compat_compose_vars())
-        # plugin provides "aws_ec2", but not this which the script gave
-        ret['groups'] = {'ec2': True}
-        # public_ip as hostname is non-default plugin behavior, script behavior
-        ret['hostnames'] = [
-            'network-interface.addresses.association.public-ip',
-            'dns-name',
-            'private-dns-name'
-        ]
-        # The script returned only running state by default, the plugin does not
-        # https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-instances.html#options
-        # options: pending | running | shutting-down | terminated | stopping | stopped
-        inst_filters['instance-state-name'] = ['running']
-        # end compatibility content
-
-        if compose_dict:
-            ret['compose'] = compose_dict
-
-        if inventory_update.instance_filters:
-            # logic used to live in ec2.py, now it belongs to us. Yay more code?
-            filter_sets = [f for f in inventory_update.instance_filters.split(',') if f]
-
-            for instance_filter in filter_sets:
-                # AND logic not supported, unclear how to...
-                instance_filter = instance_filter.strip()
-                if not instance_filter or '=' not in instance_filter:
-                    continue
-                filter_key, filter_value = [x.strip() for x in instance_filter.split('=', 1)]
-                if not filter_key:
-                    continue
-                inst_filters[filter_key] = filter_value
-
-        if inst_filters:
-            ret['filters'] = inst_filters
-
-        if inventory_update.source_regions and 'all' not in inventory_update.source_regions:
-            ret['regions'] = inventory_update.source_regions.split(',')
-
-        return ret
-
-    def build_script_private_data(self, inventory_update, private_data_dir):
-        cp = configparser.RawConfigParser()
-        # Build custom ec2.ini for ec2 inventory script to use.
-        section = 'ec2'
-        cp.add_section(section)
-        ec2_opts = dict(inventory_update.source_vars_dict.items())
-        regions = inventory_update.source_regions or 'all'
-        regions = ','.join([x.strip() for x in regions.split(',')])
-        regions_blacklist = ','.join(settings.EC2_REGIONS_BLACKLIST)
-        ec2_opts['regions'] = regions
-        ec2_opts.setdefault('regions_exclude', regions_blacklist)
-        ec2_opts.setdefault('destination_variable', 'public_dns_name')
-        ec2_opts.setdefault('vpc_destination_variable', 'ip_address')
-        ec2_opts.setdefault('route53', 'False')
-        ec2_opts.setdefault('all_instances', 'True')
-        ec2_opts.setdefault('all_rds_instances', 'False')
-        ec2_opts.setdefault('include_rds_clusters', 'False')
-        ec2_opts.setdefault('rds', 'False')
-        ec2_opts.setdefault('nested_groups', 'True')
-        ec2_opts.setdefault('elasticache', 'False')
-        ec2_opts.setdefault('stack_filters', 'False')
-        if inventory_update.instance_filters:
-            ec2_opts.setdefault('instance_filters', inventory_update.instance_filters)
-        group_by = [x.strip().lower() for x in inventory_update.group_by.split(',') if x.strip()]
-        for choice in inventory_update.get_ec2_group_by_choices():
-            value = bool((group_by and choice[0] in group_by) or (not group_by and choice[0] != 'instance_id'))
-            ec2_opts.setdefault('group_by_%s' % choice[0], str(value))
-        if 'cache_path' not in ec2_opts:
-            cache_path = tempfile.mkdtemp(prefix='ec2_cache', dir=private_data_dir)
-            ec2_opts['cache_path'] = cache_path
-        ec2_opts.setdefault('cache_max_age', '300')
-        for k, v in ec2_opts.items():
-            cp.set(section, k, str(v))
-        return self.dump_cp(cp, inventory_update.get_cloud_credential())
-
 
 class gce(PluginFileInjector):
     plugin_name = 'gcp_compute'
-    initial_version = '2.8'  # Driven by unsafe group names issue, hostvars
-    ini_env_reference = 'GCE_INI_PATH'
     base_injector = 'managed'
+    namespace = 'google'
+    collection = 'cloud'
 
     def get_plugin_env(self, *args, **kwargs):
         ret = super(gce, self).get_plugin_env(*args, **kwargs)
@@ -2132,156 +1445,31 @@ class gce(PluginFileInjector):
         ret['ANSIBLE_JINJA2_NATIVE'] = str(True)
         return ret
 
-    def get_script_env(self, inventory_update, private_data_dir, private_data_files):
-        env = super(gce, self).get_script_env(inventory_update, private_data_dir, private_data_files)
-        cred = inventory_update.get_cloud_credential()
-        # these environment keys are unique to the script operation, and are not
-        # concepts in the modern inventory plugin or gce Ansible module
-        # email and project are redundant with the creds file
-        env['GCE_EMAIL'] = cred.get_input('username', default='')
-        env['GCE_PROJECT'] = cred.get_input('project', default='')
-        env['GCE_ZONE'] = inventory_update.source_regions if inventory_update.source_regions != 'all' else ''  # noqa
-        return env
-
-    def _compat_compose_vars(self):
-        # missing: gce_image, gce_uuid
-        # https://github.com/ansible/ansible/issues/51884
-        return {
-            'gce_description': 'description if description else None',
-            'gce_machine_type': 'machineType',
-            'gce_name': 'name',
-            'gce_network': 'networkInterfaces[0].network.name',
-            'gce_private_ip': 'networkInterfaces[0].networkIP',
-            'gce_public_ip': 'networkInterfaces[0].accessConfigs[0].natIP | default(None)',
-            'gce_status': 'status',
-            'gce_subnetwork': 'networkInterfaces[0].subnetwork.name',
-            'gce_tags': 'tags.get("items", [])',
-            'gce_zone': 'zone',
-            'gce_metadata': 'metadata.get("items", []) | items2dict(key_name="key", value_name="value")',
-            # NOTE: image hostvar is enabled via retrieve_image_info option
-            'gce_image': 'image',
-            # We need this as long as hostnames is non-default, otherwise hosts
-            # will not be addressed correctly, was returned in script
-            'ansible_ssh_host': 'networkInterfaces[0].accessConfigs[0].natIP | default(networkInterfaces[0].networkIP)'
-        }
-
     def inventory_as_dict(self, inventory_update, private_data_dir):
-        ret = super(gce, self).inventory_as_dict(inventory_update, private_data_dir)
+        ret = super().inventory_as_dict(inventory_update, private_data_dir)
         credential = inventory_update.get_cloud_credential()
-
-        # auth related items
-        ret['projects'] = [credential.get_input('project', default='')]
-        ret['auth_kind'] = "serviceaccount"
-
-        filters = []
-        # TODO: implement gce group_by options
-        # gce never processed the group_by field, if it had, we would selectively
-        # apply those options here, but it did not, so all groups are added here
-        keyed_groups = [
-            # the jinja2 syntax is duplicated with compose
-            # https://github.com/ansible/ansible/issues/51883
-            {'prefix': 'network', 'key': 'gce_subnetwork'},  # composed var
-            {'prefix': '', 'separator': '', 'key': 'gce_private_ip'},  # composed var
-            {'prefix': '', 'separator': '', 'key': 'gce_public_ip'},  # composed var
-            {'prefix': '', 'separator': '', 'key': 'machineType'},
-            {'prefix': '', 'separator': '', 'key': 'zone'},
-            {'prefix': 'tag', 'key': 'gce_tags'},  # composed var
-            {'prefix': 'status', 'key': 'status | lower'},
-            # NOTE: image hostvar is enabled via retrieve_image_info option
-            {'prefix': '', 'separator': '', 'key': 'image'},
-        ]
-        # This will be used as the gce instance_id, must be universal, non-compat
-        compose_dict = {'gce_id': 'id'}
-
-        # Compatibility content
-        # TODO: proper group_by and instance_filters support, irrelevant of compat mode
-        # The gce.py script never sanitized any names in any way
-        ret['use_contrib_script_compatible_sanitization'] = True
-        # Perform extra API query to get the image hostvar
-        ret['retrieve_image_info'] = True
-        # Add in old hostvars aliases
-        compose_dict.update(self._compat_compose_vars())
-        # Non-default names to match script
-        ret['hostnames'] = ['name', 'public_ip', 'private_ip']
-        # end compatibility content
-
-        if keyed_groups:
-            ret['keyed_groups'] = keyed_groups
-        if filters:
-            ret['filters'] = filters
-        if compose_dict:
-            ret['compose'] = compose_dict
-        if inventory_update.source_regions and 'all' not in inventory_update.source_regions:
-            ret['zones'] = inventory_update.source_regions.split(',')
+        # InventorySource.source_vars take precedence over ENV vars
+        if 'projects' not in ret:
+            ret['projects'] = [credential.get_input('project', default='')]
         return ret
-
-    def build_script_private_data(self, inventory_update, private_data_dir):
-        cp = configparser.RawConfigParser()
-        # by default, the GCE inventory source caches results on disk for
-        # 5 minutes; disable this behavior
-        cp.add_section('cache')
-        cp.set('cache', 'cache_max_age', '0')
-        return self.dump_cp(cp, inventory_update.get_cloud_credential())
 
 
 class vmware(PluginFileInjector):
-    # plugin_name = 'vmware_vm_inventory'  # FIXME: implement me
-    ini_env_reference = 'VMWARE_INI_PATH'
+    plugin_name = 'vmware_vm_inventory'
     base_injector = 'managed'
-
-    @property
-    def script_name(self):
-        return 'vmware_inventory.py'  # exception
-
-    def build_script_private_data(self, inventory_update, private_data_dir):
-        cp = configparser.RawConfigParser()
-        credential = inventory_update.get_cloud_credential()
-
-        # Allow custom options to vmware inventory script.
-        section = 'vmware'
-        cp.add_section(section)
-        cp.set('vmware', 'cache_max_age', '0')
-        cp.set('vmware', 'validate_certs', str(settings.VMWARE_VALIDATE_CERTS))
-        cp.set('vmware', 'username', credential.get_input('username', default=''))
-        cp.set('vmware', 'password', credential.get_input('password', default=''))
-        cp.set('vmware', 'server', credential.get_input('host', default=''))
-
-        vmware_opts = dict(inventory_update.source_vars_dict.items())
-        if inventory_update.instance_filters:
-            vmware_opts.setdefault('host_filters', inventory_update.instance_filters)
-        if inventory_update.group_by:
-            vmware_opts.setdefault('groupby_patterns', inventory_update.group_by)
-
-        for k, v in vmware_opts.items():
-            cp.set(section, k, str(v))
-
-        return self.dump_cp(cp, credential)
+    namespace = 'community'
+    collection = 'vmware'
 
 
 class openstack(PluginFileInjector):
-    ini_env_reference = 'OS_CLIENT_CONFIG_FILE'
     plugin_name = 'openstack'
-    # minimum version of 2.7.8 may be theoretically possible
-    initial_version = '2.8'  # Driven by consistency with other sources
+    namespace = 'openstack'
+    collection = 'cloud'
 
-    @property
-    def script_name(self):
-        return 'openstack_inventory.py'  # exception
-
-    def _get_clouds_dict(self, inventory_update, cred, private_data_dir, mk_cache=True):
+    def _get_clouds_dict(self, inventory_update, cred, private_data_dir):
         openstack_data = _openstack_data(cred)
 
         openstack_data['clouds']['devstack']['private'] = inventory_update.source_vars_dict.get('private', True)
-        if mk_cache:
-            # Retrieve cache path from inventory update vars if available,
-            # otherwise create a temporary cache path only for this update.
-            cache = inventory_update.source_vars_dict.get('cache', {})
-            if not isinstance(cache, dict):
-                cache = {}
-            if not cache.get('path', ''):
-                cache_path = tempfile.mkdtemp(prefix='openstack_cache', dir=private_data_dir)
-                cache['path'] = cache_path
-            openstack_data['cache'] = cache
         ansible_variables = {
             'use_hostnames': True,
             'expand_hostvars': False,
@@ -2298,139 +1486,47 @@ class openstack(PluginFileInjector):
             openstack_data['ansible'] = ansible_variables
         return openstack_data
 
-    def build_script_private_data(self, inventory_update, private_data_dir, mk_cache=True):
+    def build_plugin_private_data(self, inventory_update, private_data_dir):
         credential = inventory_update.get_cloud_credential()
         private_data = {'credentials': {}}
 
-        openstack_data = self._get_clouds_dict(inventory_update, credential, private_data_dir, mk_cache=mk_cache)
-        private_data['credentials'][credential] = yaml.safe_dump(
-            openstack_data, default_flow_style=False, allow_unicode=True
-        )
+        openstack_data = self._get_clouds_dict(inventory_update, credential, private_data_dir)
+        private_data['credentials'][credential] = yaml.safe_dump(openstack_data, default_flow_style=False, allow_unicode=True)
         return private_data
 
-    def build_plugin_private_data(self, inventory_update, private_data_dir):
-        # Credentials can be passed in the same way as the script did
-        # but do not create the tmp cache file
-        return self.build_script_private_data(inventory_update, private_data_dir, mk_cache=False)
-
     def get_plugin_env(self, inventory_update, private_data_dir, private_data_files):
-        return self.get_script_env(inventory_update, private_data_dir, private_data_files)
-
-    def inventory_as_dict(self, inventory_update, private_data_dir):
-        def use_host_name_for_name(a_bool_maybe):
-            if not isinstance(a_bool_maybe, bool):
-                # Could be specified by user via "host" or "uuid"
-                return a_bool_maybe
-            elif a_bool_maybe:
-                return 'name'  # plugin default
-            else:
-                return 'uuid'
-
-        ret = dict(
-            plugin=self.plugin_name,
-            fail_on_errors=True,
-            expand_hostvars=True,
-            inventory_hostname=use_host_name_for_name(False),
-        )
-        # Note: mucking with defaults will break import integrity
-        # For the plugin, we need to use the same defaults as the old script
-        # or else imports will conflict. To find script defaults you have
-        # to read source code of the script.
-        #
-        # Script Defaults                           Plugin Defaults
-        # 'use_hostnames': False,                   'name' (True)
-        # 'expand_hostvars': True,                  'no' (False)
-        # 'fail_on_errors': True,                   'no' (False)
-        #
-        # These are, yet again, different from ansible_variables in script logic
-        # but those are applied inconsistently
-        source_vars = inventory_update.source_vars_dict
-        for var_name in ['expand_hostvars', 'fail_on_errors']:
-            if var_name in source_vars:
-                ret[var_name] = source_vars[var_name]
-        if 'use_hostnames' in source_vars:
-            ret['inventory_hostname'] = use_host_name_for_name(source_vars['use_hostnames'])
-        return ret
+        env = super(openstack, self).get_plugin_env(inventory_update, private_data_dir, private_data_files)
+        credential = inventory_update.get_cloud_credential()
+        cred_data = private_data_files['credentials']
+        env['OS_CLIENT_CONFIG_FILE'] = to_container_path(cred_data[credential], private_data_dir)
+        return env
 
 
 class rhv(PluginFileInjector):
-    """ovirt uses the custom credential templating, and that is all
-    """
-    # plugin_name = 'FIXME'  # contribute inventory plugin to Ansible
-    base_injector = 'template'
+    """ovirt uses the custom credential templating, and that is all"""
 
-    @property
-    def script_name(self):
-        return 'ovirt4.py'  # exception
+    plugin_name = 'ovirt'
+    base_injector = 'template'
+    initial_version = '2.9'
+    namespace = 'ovirt'
+    collection = 'ovirt'
+    downstream_namespace = 'redhat'
+    downstream_collection = 'rhv'
 
 
 class satellite6(PluginFileInjector):
     plugin_name = 'foreman'
-    ini_env_reference = 'FOREMAN_INI_PATH'
-    # initial_version = '2.8'  # FIXME: turn on after plugin is validated
-    # No base injector, because this does not work in playbooks. Bug??
-
-    @property
-    def script_name(self):
-        return 'foreman.py'  # exception
-
-    def build_script_private_data(self, inventory_update, private_data_dir):
-        cp = configparser.RawConfigParser()
-        credential = inventory_update.get_cloud_credential()
-
-        section = 'foreman'
-        cp.add_section(section)
-
-        group_patterns = '[]'
-        group_prefix = 'foreman_'
-        want_hostcollections = 'False'
-        want_ansible_ssh_host = 'False'
-        rich_params = 'False'
-        want_facts = 'True'
-        foreman_opts = dict(inventory_update.source_vars_dict.items())
-        foreman_opts.setdefault('ssl_verify', 'False')
-        for k, v in foreman_opts.items():
-            if k == 'satellite6_group_patterns' and isinstance(v, str):
-                group_patterns = v
-            elif k == 'satellite6_group_prefix' and isinstance(v, str):
-                group_prefix = v
-            elif k == 'satellite6_want_hostcollections' and isinstance(v, bool):
-                want_hostcollections = v
-            elif k == 'satellite6_want_ansible_ssh_host' and isinstance(v, bool):
-                want_ansible_ssh_host = v
-            elif k == 'satellite6_rich_params' and isinstance(v, bool):
-                rich_params = v
-            elif k == 'satellite6_want_facts' and isinstance(v, bool):
-                want_facts = v
-            else:
-                cp.set(section, k, str(v))
-
-        if credential:
-            cp.set(section, 'url', credential.get_input('host', default=''))
-            cp.set(section, 'user', credential.get_input('username', default=''))
-            cp.set(section, 'password', credential.get_input('password', default=''))
-
-        section = 'ansible'
-        cp.add_section(section)
-        cp.set(section, 'group_patterns', group_patterns)
-        cp.set(section, 'want_facts', str(want_facts))
-        cp.set(section, 'want_hostcollections', str(want_hostcollections))
-        cp.set(section, 'group_prefix', group_prefix)
-        cp.set(section, 'want_ansible_ssh_host', str(want_ansible_ssh_host))
-        cp.set(section, 'rich_params', str(rich_params))
-
-        section = 'cache'
-        cp.add_section(section)
-        cp.set(section, 'path', '/tmp')
-        cp.set(section, 'max_age', '0')
-
-        return self.dump_cp(cp, credential)
+    namespace = 'theforeman'
+    collection = 'foreman'
+    downstream_namespace = 'redhat'
+    downstream_collection = 'satellite'
+    use_fqcn = True
 
     def get_plugin_env(self, inventory_update, private_data_dir, private_data_files):
         # this assumes that this is merged
         # https://github.com/ansible/ansible/pull/52693
         credential = inventory_update.get_cloud_credential()
-        ret = {}
+        ret = super(satellite6, self).get_plugin_env(inventory_update, private_data_dir, private_data_files)
         if credential:
             ret['FOREMAN_SERVER'] = credential.get_input('host', default='')
             ret['FOREMAN_USER'] = credential.get_input('username', default='')
@@ -2438,65 +1534,23 @@ class satellite6(PluginFileInjector):
         return ret
 
 
-class cloudforms(PluginFileInjector):
-    # plugin_name = 'FIXME'  # contribute inventory plugin to Ansible
-    ini_env_reference = 'CLOUDFORMS_INI_PATH'
-    # Also no base_injector because this does not work in playbooks
-
-    def build_script_private_data(self, inventory_update, private_data_dir):
-        cp = configparser.RawConfigParser()
-        credential = inventory_update.get_cloud_credential()
-
-        section = 'cloudforms'
-        cp.add_section(section)
-
-        if credential:
-            cp.set(section, 'url', credential.get_input('host', default=''))
-            cp.set(section, 'username', credential.get_input('username', default=''))
-            cp.set(section, 'password', credential.get_input('password', default=''))
-            cp.set(section, 'ssl_verify', "false")
-
-        cloudforms_opts = dict(inventory_update.source_vars_dict.items())
-        for opt in ['version', 'purge_actions', 'clean_group_keys', 'nest_tags', 'suffix', 'prefer_ipv4']:
-            if opt in cloudforms_opts:
-                cp.set(section, opt, str(cloudforms_opts[opt]))
-
-        section = 'cache'
-        cp.add_section(section)
-        cp.set(section, 'max_age', "0")
-        cache_path = tempfile.mkdtemp(
-            prefix='cloudforms_cache',
-            dir=private_data_dir
-        )
-        cp.set(section, 'path', cache_path)
-
-        return self.dump_cp(cp, credential)
-
-
-class tower(PluginFileInjector):
-    plugin_name = 'tower'
+class controller(PluginFileInjector):
+    plugin_name = 'tower'  # TODO: relying on routing for now, update after EEs pick up revised collection
     base_injector = 'template'
-    initial_version = '2.8'  # Driven by "include_metadata" hostvars
+    namespace = 'awx'
+    collection = 'awx'
+    downstream_namespace = 'ansible'
+    downstream_collection = 'controller'
 
-    def get_script_env(self, inventory_update, private_data_dir, private_data_files):
-        env = super(tower, self).get_script_env(inventory_update, private_data_dir, private_data_files)
-        env['TOWER_INVENTORY'] = inventory_update.instance_filters
-        env['TOWER_LICENSE_TYPE'] = get_licenser().validate().get('license_type', 'unlicensed')
-        return env
 
-    def inventory_as_dict(self, inventory_update, private_data_dir):
-        # Credentials injected as env vars, same as script
-        try:
-            # plugin can take an actual int type
-            identifier = int(inventory_update.instance_filters)
-        except ValueError:
-            # inventory_id could be a named URL
-            identifier = iri_to_uri(inventory_update.instance_filters)
-        return {
-            'plugin': self.plugin_name,
-            'inventory_id': identifier,
-            'include_metadata': True  # used for license check
-        }
+class insights(PluginFileInjector):
+    plugin_name = 'insights'
+    base_injector = 'template'
+    namespace = 'redhatinsights'
+    collection = 'insights'
+    downstream_namespace = 'redhat'
+    downstream_collection = 'insights'
+    use_fqcn = True
 
 
 for cls in PluginFileInjector.__subclasses__():

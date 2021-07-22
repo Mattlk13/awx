@@ -34,7 +34,7 @@ export function getQSConfig(
  */
 export function parseQueryString(config, queryString) {
   if (!queryString) {
-    return config.defaultParams;
+    return config.defaultParams || {};
   }
   const params = stringToObject(config, queryString);
   return addDefaultsToObject(config, params);
@@ -44,7 +44,7 @@ function stringToObject(config, qs) {
   const params = {};
   qs.replace(/^\?/, '')
     .split('&')
-    .map(s => s.split('='))
+    .map((s) => s.split('='))
     .forEach(([nsKey, rawValue]) => {
       if (!nsKey || !namespaceMatches(config.namespace, nsKey)) {
         return;
@@ -72,7 +72,7 @@ const namespaceMatches = (namespace, fieldname) => {
 };
 
 function parseValue(config, key, rawValue) {
-  if (config.integerFields && config.integerFields.some(v => v === key)) {
+  if (config.integerFields && config.integerFields.some((v) => v === key)) {
     return parseInt(rawValue, 10);
   }
   // TODO: parse dateFields into date format?
@@ -90,17 +90,16 @@ export { addDefaultsToObject as _addDefaultsToObject };
 /**
  * Convert query param object to url query string
  * Used to encode params for interacting with the api
- * @param {object} qs config object for namespacing params, filtering defaults
  * @param {object} query param object
  * @return {string} url query string
  */
-export const encodeQueryString = params => {
+export const encodeQueryString = (params) => {
   if (!params) return '';
 
   return Object.keys(params)
     .sort()
-    .filter(key => params[key] !== null)
-    .map(key => [key, params[key]])
+    .filter((key) => params[key] !== null)
+    .map((key) => [key, params[key]])
     .map(([key, value]) => encodeValue(key, value))
     .join('&');
 };
@@ -108,44 +107,11 @@ export const encodeQueryString = params => {
 function encodeValue(key, value) {
   if (Array.isArray(value)) {
     return value
-      .map(val => `${encodeURIComponent(key)}=${encodeURIComponent(val)}`)
+      .map((val) => `${encodeURIComponent(key)}=${encodeURIComponent(val)}`)
       .join('&');
   }
   return `${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
 }
-
-/**
- * Convert query param object to url query string, adding namespace and
- * removing defaults. Used to put into url bar after ui route
- * @param {object} qs config object for namespacing params, filtering defaults
- * @param {object} query param object
- * @return {string} url query string
- */
-export const encodeNonDefaultQueryString = (config, params) => {
-  if (!params) return '';
-
-  const paramsWithoutDefaults = removeParams({}, params, config.defaultParams);
-  return encodeQueryString(
-    namespaceParams(config.namespace, paramsWithoutDefaults)
-  );
-};
-
-/**
- * helper function to namespace params object
- * @param {string} namespace to append to params
- * @param {object} params object to append namespace to
- * @return {object} params object with namespaced keys
- */
-const namespaceParams = (namespace, params) => {
-  if (!namespace) return params;
-
-  const namespaced = {};
-  Object.keys(params).forEach(key => {
-    namespaced[`${namespace}.${key}`] = params[key];
-  });
-
-  return namespaced;
-};
 
 /**
  * Removes params from the search string and returns the updated list of params
@@ -158,11 +124,20 @@ export function removeParams(config, oldParams, paramsToRemove) {
   const updated = {
     ...config.defaultParams,
   };
-  Object.keys(oldParams).forEach(key => {
-    const value = removeParam(oldParams[key], paramsToRemove[key]);
-    if (value) {
-      updated[key] = value;
+  Object.keys(oldParams).forEach((key) => {
+    const valToRemove = paramsToRemove[key];
+    const isInt = config.integerFields?.includes(key);
+    const updatedValue = removeParam(
+      oldParams[key],
+      isInt ? parseInt(valToRemove, 10) : valToRemove
+    );
+    if (
+      updatedValue == null &&
+      Object.prototype.hasOwnProperty.call(updated, key)
+    ) {
+      return;
     }
+    updated[key] = updatedValue;
   });
   return updated;
 }
@@ -194,10 +169,10 @@ function removeParam(oldVal, deleteVal) {
  */
 export function mergeParams(oldParams, newParams) {
   const merged = {};
-  Object.keys(oldParams).forEach(key => {
+  Object.keys(oldParams).forEach((key) => {
     merged[key] = mergeParam(oldParams[key], newParams[key]);
   });
-  Object.keys(newParams).forEach(key => {
+  Object.keys(newParams).forEach((key) => {
     if (!merged[key]) {
       merged[key] = newParams[key];
     }
@@ -206,10 +181,10 @@ export function mergeParams(oldParams, newParams) {
 }
 
 function mergeParam(oldVal, newVal) {
-  if (!newVal) {
+  if (!newVal && newVal !== '') {
     return oldVal;
   }
-  if (!oldVal) {
+  if (!oldVal && oldVal !== '') {
     return newVal;
   }
   let merged;
@@ -230,15 +205,42 @@ function dedupeArray(arr) {
 }
 
 /**
- * Join old and new params together, replacing old values with new ones where
- * necessary
- * @param {object} namespaced params object of old params
- * @param {object} namespaced params object of new params
- * @return {object} joined namespaced params object
+ * Update namespaced param(s), returning a new query string. Leaves params
+ * from other namespaces unaltered
+ * @param {object} qs config object for namespacing params, filtering defaults
+ * @param {string} the url query string to update
+ * @param {object} namespaced params to add or update. use null to indicate
+ *        a param that should be deleted from the query string
+ * @return {string} url query string
  */
-export function replaceParams(oldParams, newParams) {
-  return {
-    ...oldParams,
-    ...newParams,
-  };
+export function updateQueryString(config, queryString, newParams) {
+  const allParams = parseFullQueryString(queryString);
+  const { namespace = null, defaultParams = {} } = config || {};
+  Object.keys(newParams).forEach((key) => {
+    const val = newParams[key];
+    const fullKey = namespace ? `${namespace}.${key}` : key;
+    if (val === null || val === defaultParams[key]) {
+      delete allParams[fullKey];
+    } else {
+      allParams[fullKey] = newParams[key];
+    }
+  });
+  return encodeQueryString(allParams);
+}
+
+function parseFullQueryString(queryString) {
+  const allParams = {};
+  queryString
+    .replace(/^\?/, '')
+    .split('&')
+    .map((s) => s.split('='))
+    .forEach(([rawKey, rawValue]) => {
+      if (!rawKey) {
+        return;
+      }
+      const key = decodeURIComponent(rawKey);
+      const value = decodeURIComponent(rawValue);
+      allParams[key] = mergeParam(allParams[key], value);
+    });
+  return allParams;
 }

@@ -16,6 +16,7 @@ done by getting via bash in the running Docker machine. Example:
 ```bash
 docker-machine ssh default sudo sysctl -w vm.max_map_count=262144
 ```
+> Note: If you are running docker natively on linux, you need only run `sysctl -w vm.max_map_count=262144`
 
 After this, the containers can be started up with commands like:
 
@@ -94,7 +95,7 @@ and
     "LOG_AGGREGATOR_TCP_TIMEOUT": 5
 }
 ```
-These can be entered via Configure-Tower-in-Tower by making a POST to
+These can be entered via the settings endpoint by making a POST to
 `/api/v2/settings/logging/`.
 
 ### Connecting Logstash to 3rd Party Receivers

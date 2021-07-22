@@ -2,14 +2,15 @@
 # All Rights Reserved.
 import os
 import logging
+import django
 from awx import __version__ as tower_version
 
 # Prepare the AWX environment.
 from awx import prepare_env, MODE
-prepare_env() # NOQA
+from channels.routing import get_default_application  # noqa
 
-from django.core.wsgi import get_wsgi_application  # NOQA
-from channels.asgi import get_channel_layer
+prepare_env()  # NOQA
+
 
 """
 ASGI config for AWX project.
@@ -25,13 +26,14 @@ if MODE == 'production':
     try:
         fd = open("/var/lib/awx/.tower_version", "r")
         if fd.read().strip() != tower_version:
-            raise Exception()
-    except Exception:
-        logger.error("Missing or incorrect metadata for Tower version.  Ensure Tower was installed using the setup playbook.")
-        raise Exception("Missing or incorrect metadata for Tower version.  Ensure Tower was installed using the setup playbook.")
+            raise ValueError()
+    except FileNotFoundError:
+        pass
+    except ValueError as e:
+        logger.error("Missing or incorrect metadata for controller version.  Ensure controller was installed using the setup playbook.")
+        raise Exception("Missing or incorrect metadata for controller version.  Ensure controller was installed using the setup playbook.") from e
 
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "awx.settings")
-
-
-channel_layer = get_channel_layer()
+django.setup()
+channel_layer = get_default_application()

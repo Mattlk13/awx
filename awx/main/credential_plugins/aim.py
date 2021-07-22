@@ -1,61 +1,60 @@
-from .plugin import CredentialPlugin
+from .plugin import CredentialPlugin, CertFiles, raise_for_status
 
 from urllib.parse import quote, urlencode, urljoin
 
 from django.utils.translation import ugettext_lazy as _
 import requests
 
-# AWX
-from awx.main.utils import (
-    create_temporary_fifo,
-)
-
 aim_inputs = {
-    'fields': [{
-        'id': 'url',
-        'label': _('CyberArk AIM URL'),
-        'type': 'string',
-        'format': 'url',
-    }, {
-        'id': 'app_id',
-        'label': _('Application ID'),
-        'type': 'string',
-        'secret': True,
-    }, {
-        'id': 'client_key',
-        'label': _('Client Key'),
-        'type': 'string',
-        'secret': True,
-        'multiline': True,
-    }, {
-        'id': 'client_cert',
-        'label': _('Client Certificate'),
-        'type': 'string',
-        'secret': True,
-        'multiline': True,
-    }, {
-        'id': 'verify',
-        'label': _('Verify SSL Certificates'),
-        'type': 'boolean',
-        'default': True,
-    }],
-    'metadata': [{
-        'id': 'object_query',
-        'label': _('Object Query'),
-        'type': 'string',
-        'help_text': _('Lookup query for the object. Ex: "Safe=TestSafe;Object=testAccountName123"'),
-    }, {
-        'id': 'object_query_format',
-        'label': _('Object Query Format'),
-        'type': 'string',
-        'default': 'Exact',
-        'choices': ['Exact', 'Regexp']
-    }, {
-        'id': 'reason',
-        'label': _('Reason'),
-        'type': 'string',
-        'help_text': _('Object request reason. This is only needed if it is required by the object\'s policy.')
-    }],
+    'fields': [
+        {
+            'id': 'url',
+            'label': _('CyberArk AIM URL'),
+            'type': 'string',
+            'format': 'url',
+        },
+        {
+            'id': 'app_id',
+            'label': _('Application ID'),
+            'type': 'string',
+            'secret': True,
+        },
+        {
+            'id': 'client_key',
+            'label': _('Client Key'),
+            'type': 'string',
+            'secret': True,
+            'multiline': True,
+        },
+        {
+            'id': 'client_cert',
+            'label': _('Client Certificate'),
+            'type': 'string',
+            'secret': True,
+            'multiline': True,
+        },
+        {
+            'id': 'verify',
+            'label': _('Verify SSL Certificates'),
+            'type': 'boolean',
+            'default': True,
+        },
+    ],
+    'metadata': [
+        {
+            'id': 'object_query',
+            'label': _('Object Query'),
+            'type': 'string',
+            'help_text': _('Lookup query for the object. Ex: Safe=TestSafe;Object=testAccountName123'),
+        },
+        {'id': 'object_query_format', 'label': _('Object Query Format'), 'type': 'string', 'default': 'Exact', 'choices': ['Exact', 'Regexp']},
+        {
+            'id': 'reason',
+            'label': _('Reason'),
+            'type': 'string',
+            'help_text': _('Object request reason. This is only needed if it is required by the object\'s policy.'),
+        },
+    ],
     'required': ['url', 'app_id', 'object_query'],
 }
 
@@ -81,27 +80,16 @@ def aim_backend(**kwargs):
     request_qs = '?' + urlencode(query_params, quote_via=quote)
     request_url = urljoin(url, '/'.join(['AIMWebService', 'api', 'Accounts']))
 
-    cert = None
-    if client_cert and client_key:
-        cert = (
-            create_temporary_fifo(client_cert.encode()),
-            create_temporary_fifo(client_key.encode())
+    with CertFiles(client_cert, client_key) as cert:
+        res = requests.get(
+            request_url + request_qs,
+            timeout=30,
+            cert=cert,
+            verify=verify,
+            allow_redirects=False,
         )
-    elif client_cert:
-        cert = create_temporary_fifo(client_cert.encode())
-
-    res = requests.get(
-        request_url + request_qs,
-        timeout=30,
-        cert=cert,
-        verify=verify,
-    )
-    res.raise_for_status()
+    raise_for_status(res)
     return res.json()['Content']
 
 
-aim_plugin = CredentialPlugin(
-    'CyberArk AIM Central Credential Provider Lookup',
-    inputs=aim_inputs,
-    backend=aim_backend
-)
+aim_plugin = CredentialPlugin('CyberArk AIM Central Credential Provider Lookup', inputs=aim_inputs, backend=aim_backend)

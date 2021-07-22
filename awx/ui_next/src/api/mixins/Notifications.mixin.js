@@ -1,4 +1,4 @@
-const NotificationsMixin = parent =>
+const NotificationsMixin = (parent) =>
   class extends parent {
     readOptionsNotificationTemplates(id) {
       return this.http.options(`${this.baseUrl}${id}/notification_templates/`);
@@ -87,6 +87,13 @@ const NotificationsMixin = parent =>
       notificationId,
       notificationType
     ) {
+      if (notificationType === 'approvals') {
+        return this.associateNotificationTemplatesApprovals(
+          resourceId,
+          notificationId
+        );
+      }
+
       if (notificationType === 'started') {
         return this.associateNotificationTemplatesStarted(
           resourceId,
@@ -126,6 +133,13 @@ const NotificationsMixin = parent =>
       notificationId,
       notificationType
     ) {
+      if (notificationType === 'approvals') {
+        return this.disassociateNotificationTemplatesApprovals(
+          resourceId,
+          notificationId
+        );
+      }
+
       if (notificationType === 'started') {
         return this.disassociateNotificationTemplatesStarted(
           resourceId,

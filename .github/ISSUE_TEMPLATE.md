@@ -23,15 +23,16 @@ https://www.ansible.com/security
 
 ##### ENVIRONMENT
 * AWX version: X.Y.Z
-* AWX install method: openshift, minishift, docker on linux, docker for mac, boot2docker
-* Ansible version:  X.Y.Z
+* AWX install method: operator, developer environment
+* AWX deployment target: openshift, kubernetes, minikube
 * Operating System:
 * Web Browser:
 
 ##### STEPS TO REPRODUCE
 
-<!-- For bugs, please show exactly how to reproduce the problem. For new
-features, show how the feature would be used.  -->
+<!-- For new features, show how the feature would be used. For bugs, please show
+exactly how to reproduce the problem. Ideally, provide all steps and data needed
+to recreate the bug from a new awx install. -->
 
 ##### EXPECTED RESULTS
 

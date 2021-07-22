@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 from datetime import datetime, timedelta, tzinfo
 import inspect
 import logging
@@ -10,7 +9,6 @@ import sys
 import re
 import os
 
-import six
 import yaml
 
 from awxkit.words import words
@@ -33,10 +31,10 @@ cloud_types = (
     'openstack_v2',
     'openstack_v3',
     'rhv',
-    'rax',
     'satellite6',
     'tower',
-    'vmware')
+    'vmware',
+)
 credential_type_kinds = ('cloud', 'net')
 
 not_provided = 'xx__NOT_PROVIDED__xx'
@@ -54,7 +52,6 @@ class NoReloadError(Exception):
 
 
 class PseudoNamespace(dict):
-
     def __init__(self, _d=None, **loaded):
         if not isinstance(_d, dict):
             _d = {}
@@ -81,9 +78,7 @@ class PseudoNamespace(dict):
         try:
             return self.__getitem__(attr)
         except KeyError:
-            raise AttributeError(
-                "{!r} has no attribute {!r}".format(
-                    self.__class__.__name__, attr))
+            raise AttributeError("{!r} has no attribute {!r}".format(self.__class__.__name__, attr))
 
     def __setattr__(self, attr, value):
         self.__setitem__(attr, value)
@@ -118,11 +113,7 @@ class PseudoNamespace(dict):
     # PseudoNamespaces if applicable
     def update(self, iterable=None, **kw):
         if iterable:
-            if (hasattr(iterable,
-                        'keys') and isinstance(iterable.keys,
-                                               (types.FunctionType,
-                                                types.BuiltinFunctionType,
-                                                types.MethodType))):
+            if hasattr(iterable, 'keys') and isinstance(iterable.keys, (types.FunctionType, types.BuiltinFunctionType, types.MethodType)):
                 for key in iterable:
                     self[key] = iterable[key]
             else:
@@ -133,7 +124,7 @@ class PseudoNamespace(dict):
 
 
 def is_relative_endpoint(candidate):
-    return isinstance(candidate, (six.text_type,)) and candidate.startswith('/api/')
+    return isinstance(candidate, (str,)) and candidate.startswith('/api/')
 
 
 def is_class_or_instance(obj, cls):
@@ -163,11 +154,7 @@ def filter_by_class(*item_class_tuples):
                 examined_item = item[0]
             else:
                 examined_item = item
-            if is_class_or_instance(
-                    examined_item,
-                    cls) or is_proper_subclass(
-                    examined_item,
-                    cls):
+            if is_class_or_instance(examined_item, cls) or is_proper_subclass(examined_item, cls):
                 results.append(item)
             else:
                 updated = (cls, item[1]) if was_tuple else cls
@@ -251,7 +238,7 @@ def gen_utf_char():
     is_char = False
     b = 'b'
     while not is_char:
-        b = random.randint(32, 0x10ffff)
+        b = random.randint(32, 0x10FFFF)
         is_char = chr(b).isprintable()
     return chr(b)
 
@@ -268,20 +255,12 @@ def random_ipv4():
 
 def random_ipv6():
     """Generates a random ipv6 address;; useful for testing."""
-    return ':'.join(
-        '{0:x}'.format(
-            random.randint(
-                0,
-                2 ** 16 -
-                1)) for i in range(8))
+    return ':'.join('{0:x}'.format(random.randint(0, 2 ** 16 - 1)) for i in range(8))
 
 
 def random_loopback_ip():
     """Generates a random loopback ipv4 address;; useful for testing."""
-    return "127.{}.{}.{}".format(
-        random_int(255),
-        random_int(255),
-        random_int(255))
+    return "127.{}.{}.{}".format(random_int(255), random_int(255), random_int(255))
 
 
 def random_utf8(*args, **kwargs):
@@ -291,8 +270,7 @@ def random_utf8(*args, **kwargs):
     """
     pattern = re.compile('[^\u0000-\uD7FF\uE000-\uFFFF]', re.UNICODE)
     length = args[0] if len(args) else kwargs.get('length', 10)
-    scrubbed = pattern.sub('\uFFFD', ''.join(
-        [gen_utf_char() for _ in range(length)]))
+    scrubbed = pattern.sub('\uFFFD', ''.join([gen_utf_char() for _ in range(length)]))
 
     return scrubbed
 
@@ -321,20 +299,27 @@ def update_payload(payload, fields, kwargs):
     return payload
 
 
+def set_payload_foreign_key_args(payload, fk_fields, kwargs):
+    if isinstance(fk_fields, str):
+        fk_fields = (fk_fields,)
+
+    for fk_field in fk_fields:
+        rel_obj = kwargs.get(fk_field)
+        if rel_obj is None:
+            continue
+        elif isinstance(rel_obj, int):
+            payload.update(**{fk_field: int(rel_obj)})
+        elif hasattr(rel_obj, 'id'):
+            payload.update(**{fk_field: rel_obj.id})
+        else:
+            raise AttributeError(f'Related field {fk_field} must be either integer of pkid or object')
+    return payload
+
+
 def to_str(obj):
-    if six.PY3:
-        if isinstance(obj, bytes):
-            return obj.decode('utf-8')
-        return obj
-    if not isinstance(obj, six.text_type):
-        try:
-            return str(obj)
-        except UnicodeDecodeError:
-            try:
-                obj = six.text_type(obj, 'utf8')
-            except UnicodeDecodeError:
-                obj = obj.decode('latin1')
-    return obj.encode('utf8')
+    if isinstance(obj, bytes):
+        return obj.decode('utf-8')
+    return obj
 
 
 def to_bool(obj):
@@ -369,31 +354,11 @@ def is_proper_subclass(obj, cls):
 
 def are_same_endpoint(first, second):
     """Equivalence check of two urls, stripped of query parameters"""
+
     def strip(url):
         return url.replace('www.', '').split('?')[0]
+
     return strip(first) == strip(second)
-
-
-@contextmanager
-def suppress(*exceptions):
-    """Context manager that suppresses the provided exceptions
-
-    :param exceptions: List of exceptions to suppress
-
-    Usage::
-        >>> with suppress(ZeroDivisionError):
-        >>>     foo = 1/0
-        >>>     # This code will not run
-
-    Note: This is an intermediate framework and test refactoring tool.
-    It's almost never a good idea to plan on using this. Also, note
-    that after the suppressed exception has been caught, no further
-    statements in the with block will be executed.
-    """
-    try:
-        yield
-    except exceptions:
-        pass
 
 
 def utcnow():
@@ -416,10 +381,7 @@ class UTC(tzinfo):
         return timedelta(0)
 
 
-def seconds_since_date_string(
-        date_str,
-        fmt='%Y-%m-%dT%H:%M:%S.%fZ',
-        default_tz=UTC()):
+def seconds_since_date_string(date_str, fmt='%Y-%m-%dT%H:%M:%S.%fZ', default_tz=UTC()):
     """Return the number of seconds since the date and time indicated by a date
     string and its corresponding format string.
 

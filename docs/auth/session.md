@@ -1,8 +1,6 @@
 ## Introduction
 
-Before Tower 3.3, an auth token was used as the main authentication method. Starting from Tower 3.3,
-session-based authentication will take its place as the main authentication method, and auth token
-will be replaced by OAuth 2 tokens.
+Session-based authentication is the main authentication method, and auth tokens have been replaced by OAuth 2 tokens.
 
 Session authentication is a safer way of utilizing HTTP(S) cookies. Theoretically, the user can provide authentication information, like username and password, as part of the
 `Cookie` header, but this method is vulnerable to cookie hijacks, where crackers can see and steal user
@@ -14,7 +12,7 @@ hijack cookies will only get the `session_id` itself, which does not imply any c
 a limited time, and can be revoked at any time.
 
 > Note: The CSRF token will by default allow HTTP.  To increase security, the `CSRF_COOKIE_SECURE` setting should
-be set to False.  
+be set to True.
 
 
 ## Usage

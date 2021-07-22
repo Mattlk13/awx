@@ -6,7 +6,6 @@ import contextlib
 import logging
 import threading
 import json
-import pkg_resources
 import sys
 
 # Django
@@ -31,11 +30,30 @@ from crum.signals import current_user_getter
 
 # AWX
 from awx.main.models import (
-    ActivityStream, Group, Host, InstanceGroup, Inventory, InventorySource,
-    Job, JobHostSummary, JobTemplate, OAuth2AccessToken, Organization, Project,
-    Role, SystemJob, SystemJobTemplate, UnifiedJob, UnifiedJobTemplate, User,
-    UserSessionMembership, WorkflowJobTemplateNode, WorkflowApproval,
-    WorkflowApprovalTemplate, ROLE_SINGLETON_SYSTEM_ADMINISTRATOR
+    ActivityStream,
+    ExecutionEnvironment,
+    Group,
+    Host,
+    InstanceGroup,
+    Inventory,
+    InventorySource,
+    Job,
+    JobHostSummary,
+    JobTemplate,
+    OAuth2AccessToken,
+    Organization,
+    Project,
+    Role,
+    SystemJob,
+    SystemJobTemplate,
+    UnifiedJob,
+    UnifiedJobTemplate,
+    User,
+    UserSessionMembership,
+    WorkflowJobTemplateNode,
+    WorkflowApproval,
+    WorkflowApprovalTemplate,
+    ROLE_SINGLETON_SYSTEM_ADMINISTRATOR,
 )
 from awx.main.constants import CENSOR_VALUE
 from awx.main.utils import model_instance_diff, model_to_dict, camelcase_to_underscore, get_current_apps
@@ -53,6 +71,7 @@ from awx.conf.utils import conf_to_dict
 __all__ = []
 
 logger = logging.getLogger('awx.main.signals')
+analytics_logger = logging.getLogger('awx.analytics.activity_stream')
 
 # Update has_active_failures for inventory/groups when a Host/Group is deleted,
 # when a Host-Group or Group-Group relationship is updated, or when a Job is deleted
@@ -76,23 +95,19 @@ def emit_update_inventory_on_created_or_deleted(sender, **kwargs):
     if getattr(_inventory_updates, 'is_updating', False):
         return
     instance = kwargs['instance']
-    if ('created' in kwargs and kwargs['created']) or \
-       kwargs['signal'] == post_delete:
+    if ('created' in kwargs and kwargs['created']) or kwargs['signal'] == post_delete:
         pass
     else:
         return
     sender_name = str(sender._meta.verbose_name)
-    logger.debug("%s created or deleted, updating inventory computed fields: %r %r",
-                 sender_name, sender, kwargs)
+    logger.debug("%s created or deleted, updating inventory computed fields: %r %r", sender_name, sender, kwargs)
     try:
         inventory = instance.inventory
     except Inventory.DoesNotExist:
         pass
     else:
         if inventory is not None:
-            connection.on_commit(
-                lambda: update_inventory_computed_fields.delay(inventory.id)
-            )
+            connection.on_commit(lambda: update_inventory_computed_fields.delay(inventory.id))
 
 
 def rebuild_role_ancestor_list(reverse, model, instance, pk_set, action, **kwargs):
@@ -119,6 +134,27 @@ def sync_superuser_status_to_rbac(instance, **kwargs):
         Role.singleton(ROLE_SINGLETON_SYSTEM_ADMINISTRATOR).members.add(instance)
     else:
         Role.singleton(ROLE_SINGLETON_SYSTEM_ADMINISTRATOR).members.remove(instance)
+
+
+def sync_rbac_to_superuser_status(instance, sender, **kwargs):
+    'When the is_superuser flag is false but a user has the System Admin role, update the database to reflect that'
+    if kwargs['action'] in ['post_add', 'post_remove', 'post_clear']:
+        new_status_value = bool(kwargs['action'] == 'post_add')
+        if hasattr(instance, 'singleton_name'):  # duck typing, role.members.add() vs user.roles.add()
+            role = instance
+            if role.singleton_name == ROLE_SINGLETON_SYSTEM_ADMINISTRATOR:
+                if kwargs['pk_set']:
+                    kwargs['model'].objects.filter(pk__in=kwargs['pk_set']).update(is_superuser=new_status_value)
+                elif kwargs['action'] == 'post_clear':
+                    kwargs['model'].objects.all().update(is_superuser=False)
+        else:
+            user = instance
+            if kwargs['action'] == 'post_clear':
+                user.is_superuser = False
+                user.save(update_fields=['is_superuser'])
+            elif kwargs['model'].objects.filter(pk__in=kwargs['pk_set'], singleton_name=ROLE_SINGLETON_SYSTEM_ADMINISTRATOR).exists():
+                user.is_superuser = new_status_value
+                user.save(update_fields=['is_superuser'])
 
 
 def rbac_activity_stream(instance, sender, **kwargs):
@@ -150,24 +186,34 @@ def rbac_activity_stream(instance, sender, **kwargs):
 
 
 def cleanup_detached_labels_on_deleted_parent(sender, instance, **kwargs):
-    for l in instance.labels.all():
-        if l.is_candidate_for_detach():
-            l.delete()
+    for label in instance.labels.all():
+        if label.is_candidate_for_detach():
+            label.delete()
 
 
 def save_related_job_templates(sender, instance, **kwargs):
-    '''save_related_job_templates loops through all of the
-    job templates that use an Inventory or Project that have had their
+    """save_related_job_templates loops through all of the
+    job templates that use an Inventory that have had their
     Organization updated. This triggers the rebuilding of the RBAC hierarchy
     and ensures the proper access restrictions.
-    '''
-    if sender not in (Project, Inventory):
+    """
+    if sender is not Inventory:
         raise ValueError('This signal callback is only intended for use with Project or Inventory')
+
+    update_fields = kwargs.get('update_fields', None)
+    if (update_fields and not ('organization' in update_fields or 'organization_id' in update_fields)) or kwargs.get('created', False):
+        return
 
     if instance._prior_values_store.get('organization_id') != instance.organization_id:
         jtq = JobTemplate.objects.filter(**{sender.__name__.lower(): instance})
         for jt in jtq:
-            update_role_parentage_for_instance(jt)
+            parents_added, parents_removed = update_role_parentage_for_instance(jt)
+            if parents_added or parents_removed:
+                logger.info(
+                    'Permissions on JT {} changed due to inventory {} organization change from {} to {}.'.format(
+                        jt.pk, instance.pk, instance._prior_values_store.get('organization_id'), instance.organization_id
+                    )
+                )
 
 
 def connect_computed_field_signals():
@@ -183,12 +229,12 @@ def connect_computed_field_signals():
 
 connect_computed_field_signals()
 
-post_save.connect(save_related_job_templates, sender=Project)
 post_save.connect(save_related_job_templates, sender=Inventory)
 m2m_changed.connect(rebuild_role_ancestor_list, Role.parents.through)
 m2m_changed.connect(rbac_activity_stream, Role.members.through)
 m2m_changed.connect(rbac_activity_stream, Role.parents.through)
 post_save.connect(sync_superuser_status_to_rbac, sender=User)
+m2m_changed.connect(sync_rbac_to_superuser_status, Role.members.through)
 pre_delete.connect(cleanup_detached_labels_on_deleted_parent, sender=UnifiedJob)
 pre_delete.connect(cleanup_detached_labels_on_deleted_parent, sender=UnifiedJobTemplate)
 
@@ -214,19 +260,17 @@ def migrate_children_from_deleted_group_to_parent_groups(sender, **kwargs):
     parents_pks = getattr(instance, '_saved_parents_pks', [])
     hosts_pks = getattr(instance, '_saved_hosts_pks', [])
     children_pks = getattr(instance, '_saved_children_pks', [])
-    is_updating  = getattr(_inventory_updates, 'is_updating', False)
+    is_updating = getattr(_inventory_updates, 'is_updating', False)
 
     with ignore_inventory_group_removal():
         with ignore_inventory_computed_fields():
             if parents_pks:
                 for parent_group in Group.objects.filter(pk__in=parents_pks):
                     for child_host in Host.objects.filter(pk__in=hosts_pks):
-                        logger.debug('adding host %s to parent %s after group deletion',
-                                     child_host, parent_group)
+                        logger.debug('adding host %s to parent %s after group deletion', child_host, parent_group)
                         parent_group.hosts.add(child_host)
                     for child_group in Group.objects.filter(pk__in=children_pks):
-                        logger.debug('adding group %s to parent %s after group deletion',
-                                     child_group, parent_group)
+                        logger.debug('adding group %s to parent %s after group deletion', child_group, parent_group)
                         parent_group.children.add(child_group)
                 inventory_pk = getattr(instance, '_saved_inventory_pk', None)
                 if inventory_pk and not is_updating:
@@ -266,7 +310,7 @@ def _update_host_last_jhs(host):
 @receiver(pre_delete, sender=Job)
 def save_host_pks_before_job_delete(sender, **kwargs):
     instance = kwargs['instance']
-    hosts_qs = Host.objects.filter( last_job__pk=instance.pk)
+    hosts_qs = Host.objects.filter(last_job__pk=instance.pk)
     instance._saved_hosts_pks = set(hosts_qs.values_list('pk', flat=True))
 
 
@@ -294,9 +338,9 @@ activity_stream_enabled = ActivityStreamEnabled()
 
 @contextlib.contextmanager
 def disable_activity_stream():
-    '''
+    """
     Context manager to disable capturing activity stream changes.
-    '''
+    """
     try:
         previous_value = activity_stream_enabled.enabled
         activity_stream_enabled.enabled = False
@@ -325,6 +369,7 @@ def model_serializer_mapping():
 
     from awx.conf.models import Setting
     from awx.conf.serializers import SettingSerializer
+
     return {
         Setting: SettingSerializer,
         models.User: serializers.UserActivityStreamSerializer,
@@ -334,10 +379,10 @@ def model_serializer_mapping():
         models.Group: serializers.GroupSerializer,
         models.InstanceGroup: serializers.InstanceGroupSerializer,
         models.InventorySource: serializers.InventorySourceSerializer,
-        models.CustomInventoryScript: serializers.CustomInventoryScriptSerializer,
         models.Credential: serializers.CredentialSerializer,
         models.Team: serializers.TeamSerializer,
         models.Project: serializers.ProjectSerializer,
+        models.ExecutionEnvironment: serializers.ExecutionEnvironmentSerializer,
         models.JobTemplate: serializers.JobTemplateWithSpecSerializer,
         models.Job: serializers.JobSerializer,
         models.AdHocCommand: serializers.AdHocCommandSerializer,
@@ -356,12 +401,33 @@ def model_serializer_mapping():
     }
 
 
+def emit_activity_stream_change(instance):
+    if 'migrate' in sys.argv:
+        # don't emit activity stream external logs during migrations, it
+        # could be really noisy
+        return
+    from awx.api.serializers import ActivityStreamSerializer
+
+    actor = None
+    if instance.actor:
+        actor = instance.actor.username
+    summary_fields = ActivityStreamSerializer(instance).get_summary_fields(instance)
+    analytics_logger.info(
+        'Activity Stream update entry for %s' % str(instance.object1),
+        extra=dict(
+            changes=instance.changes,
+            relationship=instance.object_relationship_type,
+            actor=actor,
+            operation=instance.operation,
+            object1=instance.object1,
+            object2=instance.object2,
+            summary_fields=summary_fields,
+        ),
+    )
+
+
 def activity_stream_create(sender, instance, created, **kwargs):
     if created and activity_stream_enabled:
-        # TODO: remove deprecated_group conditional in 3.3
-        # Skip recording any inventory source directly associated with a group.
-        if isinstance(instance, InventorySource) and instance.deprecated_group:
-            return
         _type = type(instance)
         if getattr(_type, '_deferred', False):
             return
@@ -369,21 +435,14 @@ def activity_stream_create(sender, instance, created, **kwargs):
         changes = model_to_dict(instance, model_serializer_mapping())
         # Special case where Job survey password variables need to be hidden
         if type(instance) == Job:
-            changes['credentials'] = [
-                '{} ({})'.format(c.name, c.id)
-                for c in instance.credentials.iterator()
-            ]
-            changes['labels'] = [l.name for l in instance.labels.iterator()]
+            changes['credentials'] = ['{} ({})'.format(c.name, c.id) for c in instance.credentials.iterator()]
+            changes['labels'] = [label.name for label in instance.labels.iterator()]
             if 'extra_vars' in changes:
                 changes['extra_vars'] = instance.display_extra_vars()
         if type(instance) == OAuth2AccessToken:
             changes['token'] = CENSOR_VALUE
-        activity_entry = get_activity_stream_class()(
-            operation='create',
-            object1=object1,
-            changes=json.dumps(changes),
-            actor=get_current_user_or_none())
-        #TODO: Weird situation where cascade SETNULL doesn't work
+        activity_entry = get_activity_stream_class()(operation='create', object1=object1, changes=json.dumps(changes), actor=get_current_user_or_none())
+        # TODO: Weird situation where cascade SETNULL doesn't work
         #      it might actually be a good idea to remove all of these FK references since
         #      we don't really use them anyway.
         if instance._meta.model_name != 'setting':  # Is not conf.Setting instance
@@ -392,6 +451,7 @@ def activity_stream_create(sender, instance, created, **kwargs):
         else:
             activity_entry.setting = conf_to_dict(instance)
             activity_entry.save()
+        connection.on_commit(lambda: emit_activity_stream_change(activity_entry))
 
 
 def activity_stream_update(sender, instance, **kwargs):
@@ -412,25 +472,18 @@ def activity_stream_update(sender, instance, **kwargs):
     if getattr(_type, '_deferred', False):
         return
     object1 = camelcase_to_underscore(instance.__class__.__name__)
-    activity_entry = get_activity_stream_class()(
-        operation='update',
-        object1=object1,
-        changes=json.dumps(changes),
-        actor=get_current_user_or_none())
+    activity_entry = get_activity_stream_class()(operation='update', object1=object1, changes=json.dumps(changes), actor=get_current_user_or_none())
     if instance._meta.model_name != 'setting':  # Is not conf.Setting instance
         activity_entry.save()
         getattr(activity_entry, object1).add(instance.pk)
     else:
         activity_entry.setting = conf_to_dict(instance)
         activity_entry.save()
+    connection.on_commit(lambda: emit_activity_stream_change(activity_entry))
 
 
 def activity_stream_delete(sender, instance, **kwargs):
     if not activity_stream_enabled:
-        return
-    # TODO: remove deprecated_group conditional in 3.3
-    # Skip recording any inventory source directly associated with a group.
-    if isinstance(instance, InventorySource) and instance.deprecated_group:
         return
     # Inventory delete happens in the task system rather than request-response-cycle.
     # If we trigger this handler there we may fall into db-integrity-related race conditions.
@@ -441,10 +494,7 @@ def activity_stream_delete(sender, instance, **kwargs):
         if not kwargs.get('inventory_delete_flag', False):
             return
         # Add additional data about child hosts / groups that will be deleted
-        changes['coalesced_data'] = {
-            'hosts_deleted': instance.hosts.count(),
-            'groups_deleted': instance.groups.count()
-        }
+        changes['coalesced_data'] = {'hosts_deleted': instance.hosts.count(), 'groups_deleted': instance.groups.count()}
     elif isinstance(instance, (Host, Group)) and instance.inventory.pending_deletion:
         return  # accounted for by inventory entry, above
     _type = type(instance)
@@ -454,12 +504,9 @@ def activity_stream_delete(sender, instance, **kwargs):
     object1 = camelcase_to_underscore(instance.__class__.__name__)
     if type(instance) == OAuth2AccessToken:
         changes['token'] = CENSOR_VALUE
-    activity_entry = get_activity_stream_class()(
-        operation='delete',
-        changes=json.dumps(changes),
-        object1=object1,
-        actor=get_current_user_or_none())
+    activity_entry = get_activity_stream_class()(operation='delete', changes=json.dumps(changes), object1=object1, actor=get_current_user_or_none())
     activity_entry.save()
+    connection.on_commit(lambda: emit_activity_stream_change(activity_entry))
 
 
 def activity_stream_associate(sender, instance, **kwargs):
@@ -476,7 +523,7 @@ def activity_stream_associate(sender, instance, **kwargs):
         _type = type(instance)
         if getattr(_type, '_deferred', False):
             return
-        object1=camelcase_to_underscore(obj1.__class__.__name__)
+        object1 = camelcase_to_underscore(obj1.__class__.__name__)
         obj_rel = sender.__module__ + "." + sender.__name__
 
         for entity_acted in kwargs['pk_set']:
@@ -502,17 +549,13 @@ def activity_stream_associate(sender, instance, **kwargs):
             if isinstance(obj1, SystemJob) or isinstance(obj2_actual, SystemJob):
                 continue
             activity_entry = get_activity_stream_class()(
-                changes=json.dumps(dict(object1=object1,
-                                        object1_pk=obj1.pk,
-                                        object2=object2,
-                                        object2_pk=obj2_id,
-                                        action=action,
-                                        relationship=obj_rel)),
+                changes=json.dumps(dict(object1=object1, object1_pk=obj1.pk, object2=object2, object2_pk=obj2_id, action=action, relationship=obj_rel)),
                 operation=action,
                 object1=object1,
                 object2=object2,
                 object_relationship_type=obj_rel,
-                actor=get_current_user_or_none())
+                actor=get_current_user_or_none(),
+            )
             activity_entry.save()
             getattr(activity_entry, object1).add(obj1.pk)
             getattr(activity_entry, object2).add(obj2_actual.pk)
@@ -521,9 +564,7 @@ def activity_stream_associate(sender, instance, **kwargs):
             if 'role' in kwargs:
                 role = kwargs['role']
                 if role.content_object is not None:
-                    obj_rel = '.'.join([role.content_object.__module__,
-                                        role.content_object.__class__.__name__,
-                                        role.role_field])
+                    obj_rel = '.'.join([role.content_object.__module__, role.content_object.__class__.__name__, role.role_field])
 
                 # If the m2m is from the User side we need to
                 # set the content_object of the Role for our entry.
@@ -533,15 +574,16 @@ def activity_stream_associate(sender, instance, **kwargs):
                 activity_entry.role.add(role)
                 activity_entry.object_relationship_type = obj_rel
                 activity_entry.save()
+            connection.on_commit(lambda: emit_activity_stream_change(activity_entry))
 
 
 @receiver(current_user_getter)
 def get_current_user_from_drf_request(sender, **kwargs):
-    '''
+    """
     Provider a signal handler to return the current user from the current
     request when using Django REST Framework. Requires that the APIView set
     drf_request on the underlying Django Request object.
-    '''
+    """
     request = get_current_request()
     drf_request_user = getattr(request, 'drf_request_user', False)
     return (drf_request_user, 0)
@@ -582,19 +624,15 @@ def deny_orphaned_approvals(sender, instance, **kwargs):
         approval.deny()
 
 
+@receiver(pre_delete, sender=ExecutionEnvironment)
+def remove_default_ee(sender, instance, **kwargs):
+    if instance.id == getattr(settings.DEFAULT_EXECUTION_ENVIRONMENT, 'id', None):
+        settings.DEFAULT_EXECUTION_ENVIRONMENT = None
+
+
 @receiver(post_save, sender=Session)
 def save_user_session_membership(sender, **kwargs):
     session = kwargs.get('instance', None)
-    if pkg_resources.get_distribution('channels').version >= '2':
-        # If you get into this code block, it means we upgraded channels, but
-        # didn't make the settings.SESSIONS_PER_USER feature work
-        raise RuntimeError(
-            'save_user_session_membership must be updated for channels>=2: '
-            'http://channels.readthedocs.io/en/latest/one-to-two.html#requirements'
-        )
-    if 'runworker' in sys.argv:
-        # don't track user session membership for websocket per-channel sessions
-        return
     if not session:
         return
     user_id = session.get_decoded().get(SESSION_KEY, None)
@@ -610,10 +648,7 @@ def save_user_session_membership(sender, **kwargs):
             Session.objects.filter(session_key__in=[membership.session_id]).delete()
             membership.delete()
         if len(expired):
-            consumers.emit_channel_notification(
-                'control-limit_reached_{}'.format(user_id),
-                dict(group_name='control', reason='limit_reached')
-            )
+            consumers.emit_channel_notification('control-limit_reached_{}'.format(user_id), dict(group_name='control', reason='limit_reached'))
 
 
 @receiver(post_save, sender=OAuth2AccessToken)

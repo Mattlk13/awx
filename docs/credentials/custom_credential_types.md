@@ -37,13 +37,13 @@ Important Changes
   two OpenStack credentials.
 
 * In the same manner as "promptable SSH credentials", when
-  ``ask_credential_on_launch = true``, ``JobTemplate.extra_credentials`` can be
+  ``ask_credential_on_launch = true``, ``JobTemplate.credentials`` can be
   specified in the launch payload.
 
-* Custom inventory sources can now utilize a ``Credential``; you
+* SCM inventory sources can utilize a ``Credential``; you
   can store third-party credentials encrypted within Tower and use their
-  values from within your custom inventory script (by - for example - reading
-  an environment variable or a file's contents).
+  values in the Ansible inventory loading context (by - for example -
+  an inventory script reading an environment variable or a file's contents).
 
 API Interaction for Credential Management
 -----------------------------------------
@@ -221,9 +221,9 @@ API resources in `/api/v2/` now have two credential related fields:
       ...
     }
 
-...and a new endpoint for fetching all "extra" credentials:
+...and a new endpoint for fetching all credentials:
 
-    HTTP GET /api/v2/job_templates/N/extra_credentials/
+    HTTP GET /api/v2/job_templates/N/credentials/
 
     {
         'count': N,
@@ -239,21 +239,21 @@ Similar to other list attachment/detachment API views, cloud and network
 credentials can be created and attached via an `HTTP POST` at this new
 endpoint:
 
-    HTTP POST /api/v2/job_templates/N/extra_credentials/
+    HTTP POST /api/v2/job_templates/N/credentials/
 
     {
         'id': <cloud_credential_primary_key>,
         'associate': True,
     }
 
-    HTTP POST /api/v2/job_templates/N/extra_credentials/
+    HTTP POST /api/v2/job_templates/N/credentials/
 
     {
         'id': <network_credential_primary_key>,
         'disassociate': True,
     }
 
-    HTTP POST /api/v2/job_templates/N/extra_credentials/
+    HTTP POST /api/v2/job_templates/N/credentials/
 
     {
         'name': 'My Credential',
