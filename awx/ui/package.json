@@ -55,7 +55,7 @@
     "eslint-plugin-import": "^2.7.0",
     "extract-text-webpack-plugin": "^3.0.0",
     "grunt": "^1.0.4",
-    "grunt-angular-gettext": "^2.2.3",
+    "grunt-angular-gettext": "^2.5.3",
     "grunt-cli": "^1.2.0",
     "grunt-concurrent": "^2.3.0",
     "grunt-contrib-jshint": "^1.0.0",
